@@ -1,2 +1,2 @@
-# Throne
+# Shadow
 My chess engine experiment.
