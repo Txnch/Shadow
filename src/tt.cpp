@@ -10,105 +10,105 @@
 
 namespace {
 
-static constexpr int TT_WAYS = 4;
+    static constexpr int TT_WAYS = 4;
 
-static constexpr int DEFAULT_HASH_MB = 64;
+    static constexpr int DEFAULT_HASH_MB = 64;
 
-static constexpr int MAX_HASH_MB = 65536;
+    static constexpr int MAX_HASH_MB = 65536;
 
-struct alignas(64) TTBucket {
-    TTEntry e[TT_WAYS];
-};
+    struct alignas(64) TTBucket {
+        TTEntry e[TT_WAYS];
+    };
 
-static std::vector<TTBucket> table;
-static uint64_t g_mask = 0;
-static uint8_t g_gen = 1;
-static int g_hash_mb = 0;
+    static std::vector<TTBucket> table;
+    static uint64_t g_mask = 0;
+    static uint8_t g_gen = 1;
+    static int g_hash_mb = 0;
 
 
-static inline int bound_bonus(TTFlag flag) {
-    if (flag == TT_EXACT) return 256;
-    if (flag == TT_BETA)  return 128;
-    return 0;
-}
-
-static inline int entry_score(const TTEntry& e) {
-    const int age = (int(g_gen) - int(e.gen)) & 0xFF;
-    return e.depth * 8 + bound_bonus(e.flag) - age * 4;
-}
-
-static inline int incoming_score(int depth, TTFlag flag) {
-    return depth * 8 + bound_bonus(flag);
-}
-
-static size_t floor_pow2(size_t x) {
-    if (x <= 1)
-        return 1;
-
-    size_t p = 1;
-    while ((p << 1) <= x)
-        p <<= 1;
-
-    return p;
-}
-
-static size_t buckets_for_mb(int mb) {
-    const size_t bytes = size_t(std::max(1, mb)) * 1024ULL * 1024ULL;
-    size_t buckets = bytes / sizeof(TTBucket);
-    if (buckets < 1)
-        buckets = 1;
-    return floor_pow2(buckets);
-}
-
-static void clear_table_contents() {
-    for (TTBucket& b : table) {
-        for (int w = 0; w < TT_WAYS; ++w) {
-            b.e[w].key = 0;
-            b.e[w].depth = 0;
-            b.e[w].score = 0;
-            b.e[w].flag = TT_EXACT;
-            b.e[w].best_move = 0;
-            b.e[w].static_eval = 0;
-            b.e[w].gen = 0;
-        }
+    static inline int bound_bonus(TTFlag flag) {
+        if (flag == TT_EXACT) return 256;
+        if (flag == TT_BETA)  return 128;
+        return 0;
     }
-}
 
-static void ensure_table() {
-    if (!table.empty())
-        return;
-
-    if (!tt_resize_mb(DEFAULT_HASH_MB)) {
-        table.resize(1);
-        g_mask = 0;
-        g_hash_mb = 1;
-        g_gen = 1;
-        clear_table_contents();
+    static inline int entry_score(const TTEntry& e) {
+        const int age = (int(g_gen) - int(e.gen)) & 0xFF;
+        return e.depth * 8 + bound_bonus(e.flag) - age * 4;
     }
-}
 
-static inline TTEntry* pick_replacement(TTBucket& b, uint64_t key) {
-    for (int w = 0; w < TT_WAYS; ++w)
-        if (b.e[w].key == key)
-            return &b.e[w];
+    static inline int incoming_score(int depth, TTFlag flag) {
+        return depth * 8 + bound_bonus(flag);
+    }
 
-    for (int w = 0; w < TT_WAYS; ++w)
-        if (b.e[w].key == 0)
-            return &b.e[w];
+    static size_t floor_pow2(size_t x) {
+        if (x <= 1)
+            return 1;
 
-    TTEntry* worst = &b.e[0];
-    int worstScore = entry_score(*worst);
+        size_t p = 1;
+        while ((p << 1) <= x)
+            p <<= 1;
 
-    for (int w = 1; w < TT_WAYS; ++w) {
-        const int s = entry_score(b.e[w]);
-        if (s < worstScore) {
-            worstScore = s;
-            worst = &b.e[w];
+        return p;
+    }
+
+    static size_t buckets_for_mb(int mb) {
+        const size_t bytes = size_t(std::max(1, mb)) * 1024ULL * 1024ULL;
+        size_t buckets = bytes / sizeof(TTBucket);
+        if (buckets < 1)
+            buckets = 1;
+        return floor_pow2(buckets);
+    }
+
+    static void clear_table_contents() {
+        for (TTBucket& b : table) {
+            for (int w = 0; w < TT_WAYS; ++w) {
+                b.e[w].key = 0;
+                b.e[w].depth = 0;
+                b.e[w].score = 0;
+                b.e[w].flag = TT_EXACT;
+                b.e[w].best_move = 0;
+                b.e[w].static_eval = 0;
+                b.e[w].gen = 0;
+            }
         }
     }
 
-    return worst;
-}
+    static void ensure_table() {
+        if (!table.empty())
+            return;
+
+        if (!tt_resize_mb(DEFAULT_HASH_MB)) {
+            table.resize(1);
+            g_mask = 0;
+            g_hash_mb = 1;
+            g_gen = 1;
+            clear_table_contents();
+        }
+    }
+
+    static inline TTEntry* pick_replacement(TTBucket& b, uint64_t key) {
+        for (int w = 0; w < TT_WAYS; ++w)
+            if (b.e[w].key == key)
+                return &b.e[w];
+
+        for (int w = 0; w < TT_WAYS; ++w)
+            if (b.e[w].key == 0)
+                return &b.e[w];
+
+        TTEntry* worst = &b.e[0];
+        int worstScore = entry_score(*worst);
+
+        for (int w = 1; w < TT_WAYS; ++w) {
+            const int s = entry_score(b.e[w]);
+            if (s < worstScore) {
+                worstScore = s;
+                worst = &b.e[w];
+            }
+        }
+
+        return worst;
+    }
 
 } // namespace
 

@@ -10,7 +10,6 @@
 
 namespace {
 
-
     inline Square pop_lsb_local(Bitboard& b) {
         Square s = lsb(b);
         b &= b - 1;
@@ -22,75 +21,81 @@ namespace {
     }
 
     static bool see_ge(const Position& pos, Move m, int threshold) {
-        if (!is_capture(m) && !is_promotion(m))
-            return true;
-
-        if (is_en_passant(m))
+        if (is_en_passant(m) || is_castling(m) || is_promotion(m))
             return threshold <= 0;
 
         Square from = from_sq(m);
         Square to = to_sq(m);
 
-        int gain = 0;
-        if (is_capture(m)) {
-            gain = piece_value(piece_type(pos.piece_on(to)));
-        }
-
-        if (is_promotion(m)) {
-            gain += piece_value(promotion_type(m)) - piece_value(PAWN);
-        }
-
-        if (gain < threshold)
+        const Piece mover = pos.piece_on(from);
+        if (mover == NO_PIECE)
             return false;
 
-        int nextVal = is_promotion(m) ? piece_value(promotion_type(m)) : piece_value(piece_type(pos.piece_on(from)));
+        int swap = (is_capture(m) ? piece_value(piece_type(pos.piece_on(to))) : 0) - threshold;
+        if (swap < 0)
+            return false;
 
-        if (gain - nextVal >= threshold)
+        swap = piece_value(piece_type(mover)) - swap;
+        if (swap <= 0)
             return true;
 
-        Bitboard occ = pos.all_pieces() ^ square_bb(from) ^ square_bb(to);
-        Color side = ~pos.side_to_move();
-
-        Bitboard attackers = all_attackers_to(pos, to, occ);
-
-        int balance = gain - nextVal - threshold;
+        Bitboard occupied = pos.all_pieces() ^ square_bb(from) ^ square_bb(to);
+        Bitboard attackers = all_attackers_to(pos, to, occupied);
+        Color stm = pos.side_to_move();
+        int res = 1;
 
         while (true) {
-            Bitboard myAtt = attackers & pos.pieces(side);
-            if (!myAtt)
+            stm = ~stm;
+            attackers &= occupied;
+
+            Bitboard stmAttackers = attackers & pos.pieces(stm);
+            if (!stmAttackers)
                 break;
 
-            PieceType pt = NO_PIECE_TYPE;
-            int minV = 30000;
-
-            for (int p = PAWN; p <= KING; ++p) {
-                PieceType current_pt = static_cast<PieceType>(p);
-                if (myAtt & pos.pieces(current_pt)) {
-                    minV = piece_value(current_pt);
-                    pt = current_pt;
+            if (pos.pinners(~stm) & occupied) {
+                stmAttackers &= ~pos.blockers_for_king(stm);
+                if (!stmAttackers)
                     break;
-                }
             }
 
-            Square attSq = lsb(myAtt & pos.pieces(pt));
-            occ ^= square_bb(attSq);
+            res ^= 1;
 
-            attackers |= (get_bishop_attacks(to, occ) & (pos.pieces(BISHOP) | pos.pieces(QUEEN)));
-            attackers |= (get_rook_attacks(to, occ) & (pos.pieces(ROOK) | pos.pieces(QUEEN)));
-            attackers &= occ;
-
-            balance = -balance - 1 - minV;
-            nextVal = minV;
-            side = ~side;
-
-            if (balance >= 0) {
-                if (pt == KING && (attackers & pos.pieces(side)))
-                    side = ~side;
-                break;
+            Bitboard bb = stmAttackers & pos.pieces(PAWN);
+            if (bb) {
+                if ((swap = piece_value(PAWN) - swap) < res)
+                    break;
+                occupied ^= square_bb(lsb(bb));
+                attackers |= get_bishop_attacks(to, occupied) & (pos.pieces(BISHOP) | pos.pieces(QUEEN));
+            }
+            else if ((bb = stmAttackers & pos.pieces(KNIGHT)) != 0) {
+                if ((swap = piece_value(KNIGHT) - swap) < res)
+                    break;
+                occupied ^= square_bb(lsb(bb));
+            }
+            else if ((bb = stmAttackers & pos.pieces(BISHOP)) != 0) {
+                if ((swap = piece_value(BISHOP) - swap) < res)
+                    break;
+                occupied ^= square_bb(lsb(bb));
+                attackers |= get_bishop_attacks(to, occupied) & (pos.pieces(BISHOP) | pos.pieces(QUEEN));
+            }
+            else if ((bb = stmAttackers & pos.pieces(ROOK)) != 0) {
+                if ((swap = piece_value(ROOK) - swap) < res)
+                    break;
+                occupied ^= square_bb(lsb(bb));
+                attackers |= get_rook_attacks(to, occupied) & (pos.pieces(ROOK) | pos.pieces(QUEEN));
+            }
+            else if ((bb = stmAttackers & pos.pieces(QUEEN)) != 0) {
+                swap = piece_value(QUEEN) - swap;
+                occupied ^= square_bb(lsb(bb));
+                attackers |= (get_bishop_attacks(to, occupied) & (pos.pieces(BISHOP) | pos.pieces(QUEEN)))
+                    | (get_rook_attacks(to, occupied) & (pos.pieces(ROOK) | pos.pieces(QUEEN)));
+            }
+            else {
+                return (attackers & ~pos.pieces(stm)) ? bool(res ^ 1) : bool(res);
             }
         }
 
-        return side != pos.side_to_move();
+        return bool(res);
     }
 
     static int capture_mvv_lva_internal(const Position& pos, Move m) {
@@ -134,7 +139,7 @@ int MovePicker::score_main_move(const Position& pos, Move m, const MovePicker::M
             }
 
             if (attacker != NO_PIECE)
-                score += order_data.capture_history[attacker][victim] / 16;
+                score += order_data.capture_history[attacker][to_sq(m)][victim] / 16;
         }
         return score;
     }
@@ -148,8 +153,12 @@ int MovePicker::score_main_move(const Position& pos, Move m, const MovePicker::M
         score += order_data.cont1[curPT][to_sq(m)] / 4;
     if (order_data.cont2 && unsigned(curPT) < PIECE_TYPE_NB)
         score += order_data.cont2[curPT][to_sq(m)] / 4;
-    if (order_data.quiet_check_bonus && pos.gives_check(m))
-        score += order_data.quiet_check_bonus;
+    if (order_data.cont4 && unsigned(curPT) < PIECE_TYPE_NB)
+        score += order_data.cont4[curPT][to_sq(m)] / 4;
+    const PieceType pt = piece_type(pos.piece_on(from_sq(m)));
+    if ((pos.check_squares(pt) & square_bb(to_sq(m))) && movepick_see_ge(pos, m, -75))
+        score += 16384;
+
     return score;
 }
 
@@ -314,7 +323,6 @@ Move MovePicker::next(bool skip_quiets) {
             MoveList list;
             generate_quiets(*pos_ptr, list);
 
-
             Bitboard threatByLesser[PIECE_TYPE_NB] = { 0 };
             Color opp = ~pos_ptr->side_to_move();
             Bitboard occ = pos_ptr->all_pieces();
@@ -337,7 +345,7 @@ Move MovePicker::next(bool skip_quiets) {
             }
 
 
-            threatByLesser[PAWN] = 0; 
+            threatByLesser[PAWN] = 0;
             threatByLesser[KNIGHT] = threatByLesser[BISHOP] = pawnAttacks;
             threatByLesser[ROOK] = pawnAttacks | knightAttacks | bishopAttacks;
             threatByLesser[QUEEN] = pawnAttacks | knightAttacks | bishopAttacks | rookAttacks;
@@ -424,7 +432,7 @@ Move MovePicker::next(bool skip_quiets) {
                 if (!m || m == tt)
                     continue;
 
-                int score = is_capture(m) ? score_main_move(*pos_ptr, m, order_data) : 0;
+                int score = (is_capture(m) || is_promotion(m)) ? score_main_move(*pos_ptr, m, order_data) : 0;
                 moves[captEnd] = m;
                 scores[captEnd] = score;
                 captEnd++;

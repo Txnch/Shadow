@@ -221,3 +221,6 @@ Bitboard attacks_from(const Position& pos, Square sq)
     }
 }
 
+
+
+

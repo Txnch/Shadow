@@ -32,9 +32,10 @@ int main(int argc, char* argv[])
 
             std::string epd_file = (argc >= 5) ? argv[4] : "none";
             int nodes = (argc >= 6) ? std::stoi(argv[5]) : 5000;
+            int random_opening_plies = (argc >= 7) ? std::stoi(argv[6]) : -1;
 
 
-            Throne::Datagen::run(output, epd_file, nodes, games);
+            Shadow::Datagen::run(output, epd_file, nodes, games, random_opening_plies);
             return 0;
         }
 

@@ -8,7 +8,7 @@
 #include <immintrin.h>
 #endif
 
-namespace throne_simd {
+namespace shadow_simd {
 
     static inline void copy_i16(int16_t* dst, const int16_t* src, std::size_t n) {
 #if defined(__AVX2__) || defined(_M_AVX2)
@@ -84,11 +84,9 @@ namespace throne_simd {
 #endif
     }
 
-
     static inline int64_t dot_screlu_i16(const int16_t* acc, const int16_t* weights, std::size_t n) {
 #if defined(__AVX2__) || defined(_M_AVX2)
         std::size_t i = 0;
-
 
         __m256i sum_0 = _mm256_setzero_si256();
         __m256i sum_1 = _mm256_setzero_si256();
@@ -101,11 +99,9 @@ namespace throne_simd {
         const std::size_t n16 = n & ~std::size_t(15);
 
         for (; i < n16; i += 16) {
-
             __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc + i));
             a = _mm256_max_epi16(a, zero);
             a = _mm256_min_epi16(a, max_val);
-
 
             __m256i a_sq = _mm256_mullo_epi16(a, a);
 
@@ -116,18 +112,14 @@ namespace throne_simd {
             __m128i w_lo128 = _mm256_castsi256_si128(w);
             __m128i w_hi128 = _mm256_extracti128_si256(w, 1);
 
-
             __m256i a_sq32_lo = _mm256_cvtepu16_epi32(a_sq_lo128);
             __m256i a_sq32_hi = _mm256_cvtepu16_epi32(a_sq_hi128);
-
 
             __m256i w32_lo = _mm256_cvtepi16_epi32(w_lo128);
             __m256i w32_hi = _mm256_cvtepi16_epi32(w_hi128);
 
-
             __m256i p32_lo = _mm256_mullo_epi32(a_sq32_lo, w32_lo);
             __m256i p32_hi = _mm256_mullo_epi32(a_sq32_hi, w32_hi);
-
 
             __m256i p64_0 = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(p32_lo));
             __m256i p64_1 = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(p32_lo, 1));
@@ -140,16 +132,13 @@ namespace throne_simd {
             sum_3 = _mm256_add_epi64(sum_3, p64_3);
         }
 
-
         sum_0 = _mm256_add_epi64(sum_0, sum_1);
         sum_2 = _mm256_add_epi64(sum_2, sum_3);
         sum_0 = _mm256_add_epi64(sum_0, sum_2);
 
-
         alignas(32) int64_t buffer[4];
         _mm256_store_si256(reinterpret_cast<__m256i*>(buffer), sum_0);
         int64_t out = buffer[0] + buffer[1] + buffer[2] + buffer[3];
-
 
         for (; i < n; ++i) {
             int16_t val = std::max<int16_t>(0, std::min<int16_t>(acc[i], 255));
@@ -169,4 +158,4 @@ namespace throne_simd {
 #endif
     }
 
-} // namespace throne_simd
+} // namespace shadow_simd

@@ -112,10 +112,8 @@ namespace nnue {
 
     static int evaluate_from_accs(const int16_t acc_stm[HIDDEN],
         const int16_t acc_ntm[HIDDEN]) {
-
-        int64_t sum = throne_simd::dot_screlu_i16(acc_stm, g_W2.data(), HIDDEN);
-        sum += throne_simd::dot_screlu_i16(acc_ntm, g_W2.data() + HIDDEN, HIDDEN);
-
+        int64_t sum = shadow_simd::dot_screlu_i16(acc_stm, g_W2.data(), HIDDEN);
+        sum += shadow_simd::dot_screlu_i16(acc_ntm, g_W2.data() + HIDDEN, HIDDEN);
 
         const int64_t scale_num = static_cast<int64_t>(NETWORK_SCALE);
         const int64_t scale_den = static_cast<int64_t>(QA) * QA * QB;
@@ -203,7 +201,7 @@ namespace nnue {
             return;
         }
 
-        throne_simd::copy_i16(out_acc, g_b1.data(), HIDDEN);
+        shadow_simd::copy_i16(out_acc, g_b1.data(), HIDDEN);
 
         Bitboard occ = pos.all_pieces();
         while (occ) {
@@ -211,20 +209,20 @@ namespace nnue {
             const Piece pc = pos.piece_on(sq);
             const int idx = feature_index_stm(pov, pc, sq);
             if (idx >= 0)
-                throne_simd::add_i16(out_acc, w1_row(idx), HIDDEN);
+                shadow_simd::add_i16(out_acc, w1_row(idx), HIDDEN);
         }
     }
 
     void add_feature(int16_t acc[HIDDEN], int feat_idx) {
         if (!g_ready || feat_idx < 0 || feat_idx >= INPUTS)
             return;
-        throne_simd::add_i16(acc, w1_row(feat_idx), HIDDEN);
+        shadow_simd::add_i16(acc, w1_row(feat_idx), HIDDEN);
     }
 
     void sub_feature(int16_t acc[HIDDEN], int feat_idx) {
         if (!g_ready || feat_idx < 0 || feat_idx >= INPUTS)
             return;
-        throne_simd::sub_i16(acc, w1_row(feat_idx), HIDDEN);
+        shadow_simd::sub_i16(acc, w1_row(feat_idx), HIDDEN);
     }
 
     void add_sub_feature(int16_t acc[HIDDEN], int add_feat_idx, int sub_feat_idx) {
@@ -235,14 +233,14 @@ namespace nnue {
         const bool subOk = sub_feat_idx >= 0 && sub_feat_idx < INPUTS;
 
         if (addOk && subOk) {
-            throne_simd::add_sub_i16(acc, w1_row(add_feat_idx), w1_row(sub_feat_idx), HIDDEN);
+            shadow_simd::add_sub_i16(acc, w1_row(add_feat_idx), w1_row(sub_feat_idx), HIDDEN);
             return;
         }
 
         if (addOk)
-            throne_simd::add_i16(acc, w1_row(add_feat_idx), HIDDEN);
+            shadow_simd::add_i16(acc, w1_row(add_feat_idx), HIDDEN);
         if (subOk)
-            throne_simd::sub_i16(acc, w1_row(sub_feat_idx), HIDDEN);
+            shadow_simd::sub_i16(acc, w1_row(sub_feat_idx), HIDDEN);
     }
 
     void apply_dirty(int16_t acc[HIDDEN], Color pov, const DirtyPieces& dp) {

@@ -13,7 +13,7 @@ struct TTEntry {
     TTFlag flag;
     Move best_move;
     int static_eval;
-    uint8_t gen; 
+    uint8_t gen;
 };
 
 void tt_clear();

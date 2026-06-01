@@ -17,6 +17,7 @@ struct Undo {
     uint64_t pawn_key = 0;
     uint64_t non_pawn_key[COLOR_NB]{};
     int halfmove_clock = 0;
+    int fullmove_number = 1;
     bool is_null = false;
     nnue::DirtyPieces dp{};
 };
@@ -47,6 +48,7 @@ public:
     Square ep_square()   const { return ep; }
     int castling()       const { return castling_right; }
     int halfmove_clock() const { return halfmove_clock_state; }
+    int fullmove_number() const { return fullmove_number_state; }
     uint64_t hash() const { return hash_key; }
     uint64_t pawn_key() const { return pawn_hash_key; }
     uint64_t non_pawn_key(Color c) const { return non_pawn_hash_key[c]; }
@@ -78,6 +80,7 @@ private:
     Square ep = SQ_NONE;
     int castling_right = NO_CASTLING;
     int halfmove_clock_state = 0;
+    int fullmove_number_state = 1;
 
     static constexpr int MAX_GAME_PLY = 2048;
     std::array<Undo, MAX_GAME_PLY> history{};

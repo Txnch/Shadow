@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "move.h"
 #include "bitboard.h"
 
@@ -11,7 +11,6 @@ extern Bitboard KingAttacks[SQUARE_NB];
 
 
 void init_attacks();
-
 
 
 

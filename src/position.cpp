@@ -25,7 +25,7 @@ static inline bool ep_capturable(Color stm, Square epSq, Bitboard pawns)
 
     if (stm == WHITE)
     {
-        
+
         if (f != 7)
         {
             int from = ep - 7;
@@ -41,7 +41,7 @@ static inline bool ep_capturable(Color stm, Square epSq, Bitboard pawns)
     }
     else
     {
-        
+
         if (f != 7)
         {
             int from = ep + 9;
@@ -144,7 +144,6 @@ static Bitboard between_squares(Square a, Square b)
 }
 
 static inline void aux_xor_piece_keys(Piece p, uint64_t z, uint64_t& pawnKey, std::array<uint64_t, COLOR_NB>& nonPawnKeys) {
-
     if (piece_type(p) == PAWN) {
         pawnKey ^= z;
     }
@@ -154,9 +153,9 @@ static inline void aux_xor_piece_keys(Piece p, uint64_t z, uint64_t& pawnKey, st
 }
 
 static void compute_blockers_for_king(const Position& pos,
-                                      Color kingColor,
-                                      Bitboard& blockers,
-                                      Bitboard& pinnersOfEnemy)
+    Color kingColor,
+    Bitboard& blockers,
+    Bitboard& pinnersOfEnemy)
 {
     blockers = BB_EMPTY;
     pinnersOfEnemy = BB_EMPTY;
@@ -170,7 +169,7 @@ static void compute_blockers_for_king(const Position& pos,
     const Bitboard enemyBQ = (pos.pieces(enemy) & (pos.pieces(BISHOP) | pos.pieces(QUEEN)));
 
     Bitboard snipers = (get_rook_attacks(ksq, BB_EMPTY) & enemyRQ)
-                     | (get_bishop_attacks(ksq, BB_EMPTY) & enemyBQ);
+        | (get_bishop_attacks(ksq, BB_EMPTY) & enemyBQ);
     const Bitboard occupied = pos.all_pieces() & ~snipers;
 
     while (snipers) {
@@ -219,6 +218,7 @@ void Position::clear() {
     pawn_hash_key = 0;
     non_pawn_hash_key = { 0, 0 };
     halfmove_clock_state = 0;
+    fullmove_number_state = 1;
 
     refresh_check_info();
 }
@@ -287,6 +287,7 @@ void Position::set_fen(const std::string& fen) {
     }
 
     halfmove_clock_state = (halfmove > 0) ? halfmove : 0;
+    fullmove_number_state = std::max(1, fullmove);
 
     hash_key = 0;
     pawn_hash_key = 0;
@@ -602,7 +603,7 @@ bool Position::gives_check(Move m) const {
 bool Position::is_repetition_draw(int ply_from_root) const
 {
     const int maxDist = std::min(halfmove_clock(),
-                                 plies_since_last_null(*this, history_size()));
+        plies_since_last_null(*this, history_size()));
 
     bool hitBeforeRoot = false;
     for (int i = 4; i <= maxDist; i += 2)
@@ -672,6 +673,7 @@ bool Position::make_move(Move m) {
     u.non_pawn_key[WHITE] = non_pawn_hash_key[WHITE];
     u.non_pawn_key[BLACK] = non_pawn_hash_key[BLACK];
     u.halfmove_clock = halfmove_clock_state;
+    u.fullmove_number = fullmove_number_state;
 
     u.ep_square = ep;
     u.castling_rights = castling_right;
@@ -791,6 +793,8 @@ bool Position::make_move(Move m) {
         hash_key ^= zobrist_ep[ep];
 
     side = ~side;
+    if (us == BLACK)
+        ++fullmove_number_state;
 
     const Square ourKing = king_square(us);
     if (ourKing != SQ_NONE && is_square_attacked(*this, ourKing, ~us)) {
@@ -807,6 +811,7 @@ void Position::undo_move() {
     Undo& u = history[--ply];
     Move m = u.move;
     halfmove_clock_state = u.halfmove_clock;
+    fullmove_number_state = u.fullmove_number;
 
     Square from = from_sq(m);
     Square to = to_sq(m);
@@ -890,6 +895,7 @@ void Position::do_null_move() {
     u.non_pawn_key[WHITE] = non_pawn_hash_key[WHITE];
     u.non_pawn_key[BLACK] = non_pawn_hash_key[BLACK];
     u.halfmove_clock = halfmove_clock_state;
+    u.fullmove_number = fullmove_number_state;
     u.dp = {};
 
 
@@ -917,7 +923,7 @@ void Position::undo_null_move() {
     non_pawn_hash_key[WHITE] = u.non_pawn_key[WHITE];
     non_pawn_hash_key[BLACK] = u.non_pawn_key[BLACK];
     halfmove_clock_state = u.halfmove_clock;
+    fullmove_number_state = u.fullmove_number;
     refresh_check_info();
 }
-
 

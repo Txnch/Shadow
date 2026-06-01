@@ -11,12 +11,19 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <algorithm>
+#include <cstdint>
 
 static const char* STARTPOS_FEN =
 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 static std::thread search_thread;
 static std::atomic<bool> searching(false);
+
+static constexpr int DEFAULT_MOVE_OVERHEAD_MS = 10;
+static constexpr int MIN_MOVE_OVERHEAD_MS = 0;
+static constexpr int MAX_MOVE_OVERHEAD_MS = 5000;
+static int move_overhead_ms = DEFAULT_MOVE_OVERHEAD_MS;
 
 
 
@@ -75,9 +82,12 @@ void uci_loop()
 
         if (line == "uci")
         {
-            std::cout << "id name Throne\n";
+            std::cout << "id name Shadow\n";
             std::cout << "id author TunCH\n";
             std::cout << "option name Hash type spin default " << tt_hash_mb() << " min 1 max 65536\n";
+            std::cout << "option name Move Overhead type spin default "
+                << DEFAULT_MOVE_OVERHEAD_MS << " min " << MIN_MOVE_OVERHEAD_MS
+                << " max " << MAX_MOVE_OVERHEAD_MS << "\n";
             std::cout << "uciok\n" << std::flush;
         }
 
@@ -143,6 +153,18 @@ void uci_loop()
                     std::cout << "info string Hash set to " << tt_hash_mb() << " MB\n";
                 else
                     std::cout << "info string Hash resize failed\n";
+            }
+            else if (name == "Move Overhead")
+            {
+                int overhead = move_overhead_ms;
+                if (!value.empty())
+                {
+                    try { overhead = std::stoi(value); }
+                    catch (...) {}
+                }
+
+                move_overhead_ms = std::clamp(overhead, MIN_MOVE_OVERHEAD_MS, MAX_MOVE_OVERHEAD_MS);
+                std::cout << "info string Move Overhead set to " << move_overhead_ms << " ms\n";
             }
         }
 
@@ -253,8 +275,9 @@ void uci_loop()
             int wtime = -1, btime = -1;
             int winc = 0, binc = 0;
             int movestogo = 0;
+            uint64_t nodes = 0;
             bool infinite = false;
-            bool depth_only = false; 
+            bool depth_only = false;
 
             std::istringstream ss(line);
             std::string token;
@@ -269,8 +292,12 @@ void uci_loop()
                 else if (token == "winc")     ss >> winc;
                 else if (token == "binc")     ss >> binc;
                 else if (token == "movestogo") ss >> movestogo;
+                else if (token == "nodes")    ss >> nodes;
                 else if (token == "infinite") infinite = true;
             }
+
+            if (nodes > 0)
+                infinite = false;
 
 
             int timeLeft = 0;
@@ -286,10 +313,10 @@ void uci_loop()
                 inc = binc;
             }
 
-            if (depth_only && movetime <= 0 && wtime <= 0 && btime <= 0)
+            if (depth_only && movetime <= 0 && wtime <= 0 && btime <= 0 && nodes == 0)
                 infinite = true;
 
-            if (infinite || (movetime <= 0 && wtime <= 0 && btime <= 0 && depth <= 0))
+            if (infinite || (movetime <= 0 && wtime <= 0 && btime <= 0 && depth <= 0 && nodes == 0))
                 infinite = true;
 
             stop_search_now();
@@ -298,10 +325,11 @@ void uci_loop()
 
             searching = true;
             Position search_pos = pos;
+            int move_overhead = move_overhead_ms;
 
-            search_thread = std::thread([search_pos, depth, movetime, timeLeft, inc, movestogo, infinite]() mutable
+            search_thread = std::thread([search_pos, depth, movetime, timeLeft, inc, movestogo, infinite, nodes, move_overhead]() mutable
                 {
-                    SearchResult result = search(search_pos, depth, movetime, timeLeft, inc, movestogo, infinite);
+                    SearchResult result = search(search_pos, depth, movetime, timeLeft, inc, movestogo, infinite, nodes, move_overhead);
 
                     if (result.best_move == 0)
                     {

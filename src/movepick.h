@@ -11,10 +11,10 @@ class MovePicker {
 public:
     struct MainOrderData {
         const int (*history)[64] = nullptr;
-        const int (*capture_history)[16] = nullptr; 
+        const int (*capture_history)[64][16] = nullptr;
         const int (*cont1)[64] = nullptr;
         const int (*cont2)[64] = nullptr;
-        int quiet_check_bonus = 0;
+        const int (*cont4)[64] = nullptr;
     };
 
     MovePicker();
@@ -72,8 +72,8 @@ private:
     bool has_counter = false;
 
 
-    Move moves[MAX_MOVES]{};
-    int  scores[MAX_MOVES]{};
+    Move moves[MAX_MOVES];
+    int  scores[MAX_MOVES];
 
 
     int cur = 0;
