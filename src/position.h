@@ -18,6 +18,7 @@ struct Undo {
     uint64_t non_pawn_key[COLOR_NB]{};
     int halfmove_clock = 0;
     int fullmove_number = 1;
+    int previous_null_ply = -1;
     bool is_null = false;
     nnue::DirtyPieces dp{};
 };
@@ -31,7 +32,7 @@ public:
     void clear();
     void set_fen(const std::string& fen);
 
-    bool make_move(Move m);
+    bool make_move(Move m, bool assume_pseudo_legal = false);
     void undo_move();
     void do_null_move();
     void undo_null_move();
@@ -42,6 +43,7 @@ public:
     Piece piece_on(Square s) const;
     Square king_square(Color c) const;
     bool gives_check(Move m) const;
+    bool is_legal(Move m) const;
     bool is_pseudo_legal(Move m) const;
     bool is_repetition_draw(int ply_from_root) const;
     Color side_to_move() const { return side; }
@@ -85,6 +87,7 @@ private:
     static constexpr int MAX_GAME_PLY = 2048;
     std::array<Undo, MAX_GAME_PLY> history{};
     int ply = 0;
+    int last_null_ply = -1;
     uint64_t hash_key = 0;
     uint64_t pawn_hash_key = 0;
     std::array<uint64_t, COLOR_NB> non_pawn_hash_key{ 0, 0 };

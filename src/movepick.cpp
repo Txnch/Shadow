@@ -10,14 +10,40 @@
 
 namespace {
 
+    static constexpr int PIECE_VALUES[PIECE_TYPE_NB] = {
+        0, 100, 300, 300, 500, 900, 0
+    };
+
+    static inline int value_of(PieceType pt) {
+        return unsigned(pt) < PIECE_TYPE_NB ? PIECE_VALUES[pt] : 0;
+    }
+
+    static inline Bitboard lsb_bb(Bitboard b) {
+        return b & (0ULL - b);
+    }
+
     inline Square pop_lsb_local(Bitboard& b) {
         Square s = lsb(b);
         b &= b - 1;
         return s;
     }
 
-    static Bitboard all_attackers_to(const Position& pos, Square sq, Bitboard occ) {
-        return attackers_to(pos, sq, occ, WHITE) | attackers_to(pos, sq, occ, BLACK);
+    static inline Bitboard all_attackers_to(
+        Square sq,
+        Bitboard occ,
+        const Bitboard colorPieces[COLOR_NB],
+        Bitboard pawns,
+        Bitboard knights,
+        Bitboard bishopsQueens,
+        Bitboard rooksQueens,
+        Bitboard kings)
+    {
+        return (PawnAttacks[BLACK][sq] & colorPieces[WHITE] & pawns)
+            | (PawnAttacks[WHITE][sq] & colorPieces[BLACK] & pawns)
+            | (KnightAttacks[sq] & knights)
+            | (KingAttacks[sq] & kings)
+            | (get_bishop_attacks(sq, occ) & bishopsQueens)
+            | (get_rook_attacks(sq, occ) & rooksQueens);
     }
 
     static bool see_ge(const Position& pos, Move m, int threshold) {
@@ -31,16 +57,30 @@ namespace {
         if (mover == NO_PIECE)
             return false;
 
-        int swap = (is_capture(m) ? piece_value(piece_type(pos.piece_on(to))) : 0) - threshold;
+        const Bitboard colorPieces[COLOR_NB] = {
+            pos.pieces(WHITE),
+            pos.pieces(BLACK)
+        };
+
+        const Bitboard pawns = pos.pieces(PAWN);
+        const Bitboard knights = pos.pieces(KNIGHT);
+        const Bitboard bishops = pos.pieces(BISHOP);
+        const Bitboard rooks = pos.pieces(ROOK);
+        const Bitboard queens = pos.pieces(QUEEN);
+        const Bitboard kings = pos.pieces(KING);
+        const Bitboard bishopsQueens = bishops | queens;
+        const Bitboard rooksQueens = rooks | queens;
+
+        int swap = (is_capture(m) ? value_of(piece_type(pos.piece_on(to))) : 0) - threshold;
         if (swap < 0)
             return false;
 
-        swap = piece_value(piece_type(mover)) - swap;
+        swap = value_of(piece_type(mover)) - swap;
         if (swap <= 0)
             return true;
 
         Bitboard occupied = pos.all_pieces() ^ square_bb(from) ^ square_bb(to);
-        Bitboard attackers = all_attackers_to(pos, to, occupied);
+        Bitboard attackers = all_attackers_to(to, occupied, colorPieces, pawns, knights, bishopsQueens, rooksQueens, kings);
         Color stm = pos.side_to_move();
         int res = 1;
 
@@ -48,7 +88,7 @@ namespace {
             stm = ~stm;
             attackers &= occupied;
 
-            Bitboard stmAttackers = attackers & pos.pieces(stm);
+            Bitboard stmAttackers = attackers & colorPieces[stm];
             if (!stmAttackers)
                 break;
 
@@ -60,38 +100,38 @@ namespace {
 
             res ^= 1;
 
-            Bitboard bb = stmAttackers & pos.pieces(PAWN);
+            Bitboard bb = stmAttackers & pawns;
             if (bb) {
-                if ((swap = piece_value(PAWN) - swap) < res)
+                if ((swap = PIECE_VALUES[PAWN] - swap) < res)
                     break;
-                occupied ^= square_bb(lsb(bb));
-                attackers |= get_bishop_attacks(to, occupied) & (pos.pieces(BISHOP) | pos.pieces(QUEEN));
+                occupied ^= lsb_bb(bb);
+                attackers |= get_bishop_attacks(to, occupied) & bishopsQueens;
             }
-            else if ((bb = stmAttackers & pos.pieces(KNIGHT)) != 0) {
-                if ((swap = piece_value(KNIGHT) - swap) < res)
+            else if ((bb = stmAttackers & knights) != 0) {
+                if ((swap = PIECE_VALUES[KNIGHT] - swap) < res)
                     break;
-                occupied ^= square_bb(lsb(bb));
+                occupied ^= lsb_bb(bb);
             }
-            else if ((bb = stmAttackers & pos.pieces(BISHOP)) != 0) {
-                if ((swap = piece_value(BISHOP) - swap) < res)
+            else if ((bb = stmAttackers & bishops) != 0) {
+                if ((swap = PIECE_VALUES[BISHOP] - swap) < res)
                     break;
-                occupied ^= square_bb(lsb(bb));
-                attackers |= get_bishop_attacks(to, occupied) & (pos.pieces(BISHOP) | pos.pieces(QUEEN));
+                occupied ^= lsb_bb(bb);
+                attackers |= get_bishop_attacks(to, occupied) & bishopsQueens;
             }
-            else if ((bb = stmAttackers & pos.pieces(ROOK)) != 0) {
-                if ((swap = piece_value(ROOK) - swap) < res)
+            else if ((bb = stmAttackers & rooks) != 0) {
+                if ((swap = PIECE_VALUES[ROOK] - swap) < res)
                     break;
-                occupied ^= square_bb(lsb(bb));
-                attackers |= get_rook_attacks(to, occupied) & (pos.pieces(ROOK) | pos.pieces(QUEEN));
+                occupied ^= lsb_bb(bb);
+                attackers |= get_rook_attacks(to, occupied) & rooksQueens;
             }
-            else if ((bb = stmAttackers & pos.pieces(QUEEN)) != 0) {
-                swap = piece_value(QUEEN) - swap;
-                occupied ^= square_bb(lsb(bb));
-                attackers |= (get_bishop_attacks(to, occupied) & (pos.pieces(BISHOP) | pos.pieces(QUEEN)))
-                    | (get_rook_attacks(to, occupied) & (pos.pieces(ROOK) | pos.pieces(QUEEN)));
+            else if ((bb = stmAttackers & queens) != 0) {
+                swap = PIECE_VALUES[QUEEN] - swap;
+                occupied ^= lsb_bb(bb);
+                attackers |= (get_bishop_attacks(to, occupied) & bishopsQueens)
+                    | (get_rook_attacks(to, occupied) & rooksQueens);
             }
             else {
-                return (attackers & ~pos.pieces(stm)) ? bool(res ^ 1) : bool(res);
+                return (attackers & ~colorPieces[stm]) ? bool(res ^ 1) : bool(res);
             }
         }
 
@@ -108,7 +148,7 @@ namespace {
         if (is_en_passant(m))
             victim = make_piece(~pos.side_to_move(), PAWN);
 
-        return piece_value(piece_type(victim)) * 16 - piece_value(piece_type(attacker));
+        return value_of(piece_type(victim)) * 16 - value_of(piece_type(attacker));
     }
 
 } // namespace
@@ -148,13 +188,15 @@ int MovePicker::score_main_move(const Position& pos, Move m, const MovePicker::M
     if (order_data.history)
         score += order_data.history[from_sq(m)][to_sq(m)];
 
-    const PieceType curPT = piece_type(pos.piece_on(from_sq(m)));
-    if (order_data.cont1 && unsigned(curPT) < PIECE_TYPE_NB)
-        score += order_data.cont1[curPT][to_sq(m)] / 4;
-    if (order_data.cont2 && unsigned(curPT) < PIECE_TYPE_NB)
-        score += order_data.cont2[curPT][to_sq(m)] / 4;
-    if (order_data.cont4 && unsigned(curPT) < PIECE_TYPE_NB)
-        score += order_data.cont4[curPT][to_sq(m)] / 4;
+    const Piece curPiece = pos.piece_on(from_sq(m));
+    if (curPiece != NO_PIECE) {
+        if (order_data.cont1)
+            score += order_data.cont1[curPiece][to_sq(m)] * CONTHIST1_WEIGHT / 128;
+        if (order_data.cont2)
+            score += order_data.cont2[curPiece][to_sq(m)] * CONTHIST2_WEIGHT / 128;
+        if (order_data.cont4)
+            score += order_data.cont4[curPiece][to_sq(m)] * CONTHIST4_WEIGHT / 128;
+    }
     const PieceType pt = piece_type(pos.piece_on(from_sq(m)));
     if ((pos.check_squares(pt) & square_bb(to_sq(m))) && movepick_see_ge(pos, m, -75))
         score += 16384;
@@ -372,7 +414,7 @@ Move MovePicker::next(bool skip_quiets) {
 
 
                     int v = threatened_to ? -19 : (threatened_from ? 20 : 0);
-                    score += piece_value(pt) * v;
+                    score += value_of(pt) * v;
                 }
 
                 moves[quietEnd] = m;

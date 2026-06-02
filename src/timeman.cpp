@@ -8,6 +8,11 @@ namespace {
     constexpr int DEFAULT_MOVE_OVERHEAD_MS = 10;
     constexpr int FIXED_MOVETIME_OVERHEAD_MS = 10;
     constexpr int MAX_MOVE_OVERHEAD_MS = 5000;
+    constexpr int SCORE_STABILITY_MARGIN_CP = 10;
+    constexpr int SCORE_STABILITY_MIN_DEPTH = 5;
+    constexpr double SCORE_STABILITY_BASE = 1.159;
+    constexpr double SCORE_STABILITY_MUL = 0.051;
+    constexpr double SCORE_STABILITY_MIN = 0.813;
 
     static inline int clampi(int x, int lo, int hi) {
         return std::max(lo, std::min(x, hi));
@@ -15,18 +20,6 @@ namespace {
 
     static inline double clampd(double x, double lo, double hi) {
         return std::max(lo, std::min(x, hi));
-    }
-
-    static inline double interpolate(double x,
-        double x0,
-        double x1,
-        double y0,
-        double y1) {
-        if (x1 == x0)
-            return y0;
-
-        const double t = (x - x0) / (x1 - x0);
-        return y0 + t * (y1 - y0);
     }
 
 } // namespace
@@ -37,15 +30,11 @@ TimeManager::TimeManager() {
 
 void TimeManager::reset_iteration_state() {
     previous_best_move = 0;
-    last_best_move_depth = 0;
     previous_score = 0;
+    completed_depth = 0;
+    pv_stability = 0;
+    score_stability = 0;
     has_previous_score = false;
-    total_best_move_changes = 0.0;
-    previous_time_reduction = 1.0;
-    iter_score_index = 0;
-
-    for (int& score : iter_scores)
-        score = 0;
 }
 
 void TimeManager::reset() {
@@ -117,45 +106,14 @@ void TimeManager::compute_time() {
         return;
     }
 
-    const double time = double(std::max(1, time_left));
-    const double inc = double(std::max(0, increment));
-    const double overhead = double(std::max(0, move_overhead));
+    const int default_mtg = increment > 0 ? 35 : 45;
+    const int mtg = (moves_to_go > 0 ? moves_to_go : default_mtg) + 5;
+    const int soft = (time_left - increment) / std::max(1, mtg) + increment * 3 / 4;
+    const int hard = time_left / 2;
 
-    int mtg = moves_to_go > 0 ? std::min(moves_to_go, 50) : 50;
-
-    if (time < 1000.0)
-        mtg = std::max(1, int(time * 0.05));
-
-    const double time_left_adjusted = std::max(1.0, time + inc * double(mtg - 1) - overhead * double(mtg + 2));
-
-    double opt_scale = 0.0;
-    double max_scale = 1.0;
-
-    if (moves_to_go == 0) {
-        double original_time_adjust = 0.3272 * std::log10(time_left_adjusted) - 0.4141;
-        original_time_adjust = std::max(0.05, original_time_adjust);
-
-        const double log_time_sec = std::log10(std::max(1.0, time) / 1000.0);
-        const double opt_constant = std::min(0.0029869 + 0.00033554 * log_time_sec, 0.004905);
-        const double max_constant = std::max(3.3744 + 3.0608 * log_time_sec, 3.1441);
-
-        opt_scale = std::min(0.012112 + std::pow(double(game_ply) + 3.22713, 0.46866) * opt_constant,
-            0.19404 * time / time_left_adjusted) * original_time_adjust;
-        max_scale = std::min(6.873, max_constant + double(game_ply) / 12.352);
-    }
-    else {
-        opt_scale = std::min((0.88 + double(game_ply) / 116.4) / double(mtg),
-            0.88 * time / time_left_adjusted);
-        max_scale = 1.3 + 0.11 * double(mtg);
-    }
-
-    const double optimum = std::max(1.0, opt_scale * time_left_adjusted);
-    const double hard_cap = 0.8097 * time - overhead;
-    const double maximum = std::max(optimum, std::min(hard_cap, max_scale * optimum));
-
-    const int safe_available = std::max(1, time_left - std::min(move_overhead, std::max(0, time_left - 1)));
-    optimum_time = clampi(int(optimum), 1, safe_available);
-    maximum_time = clampi(int(maximum), optimum_time, safe_available);
+    base_optimum_time = std::max(1, soft);
+    optimum_time = base_optimum_time;
+    maximum_time = std::max(1, hard);
 }
 
 void TimeManager::update_after_iteration(int depth,
@@ -167,56 +125,58 @@ void TimeManager::update_after_iteration(int depth,
     if (infinite_mode || fixed_movetime || !time_limited || base_optimum_time <= 0 || maximum_time <= 0)
         return;
 
-    total_best_move_changes *= 0.5;
+    (void)rootMoveCount;
 
-    if (previous_best_move == 0) {
-        previous_best_move = bestMove;
-        last_best_move_depth = depth;
-    }
-    else if (bestMove != previous_best_move) {
-        previous_best_move = bestMove;
-        last_best_move_depth = depth;
-        total_best_move_changes += 1.0;
-    }
+    completed_depth = depth;
 
-    if (!has_previous_score) {
+    const bool score_is_stable =
+        has_previous_score && std::abs(bestScore - previous_score) <= SCORE_STABILITY_MARGIN_CP;
+
+    if (depth < 4) {
+        previous_best_move = bestMove;
         previous_score = bestScore;
-        for (int& score : iter_scores)
-            score = bestScore;
         has_previous_score = true;
+        return;
     }
 
-    const int old_score = previous_score;
-    const int older_score = iter_scores[iter_score_index];
+    if (previous_best_move != 0 && bestMove == previous_best_move) {
+        pv_stability = std::min(pv_stability + 1, 10);
+    }
+    else {
+        pv_stability = 0;
+    }
 
-    double falling_eval = (11.87 + 2.21 * double(old_score - bestScore)
-        + double(older_score - bestScore)) / 100.0;
-    falling_eval = clampd(falling_eval, 0.572, 1.708);
+    previous_best_move = bestMove;
 
-    const double stable_depth = double(std::max(0, depth - last_best_move_depth));
-    const double time_reduction = clampd(interpolate(stable_depth, 5.0, 18.0, 0.65, 1.55), 0.65, 1.55);
-    const double reduction = (1.48 + previous_time_reduction) / (2.157 * time_reduction);
-
-    const double best_move_instability = 1.096 + 2.29 * total_best_move_changes;
-
-    const uint64_t nodes_effort = bestMoveNodes * 100000ULL / std::max<uint64_t>(1, totalNodes);
-    const double high_best_move_effort = clampd(
-        interpolate(double(nodes_effort), 79219.0, 101822.0, 0.924, 0.710),
-        0.710,
-        0.924);
-
-    double target = double(base_optimum_time) * falling_eval * reduction
-        * best_move_instability * high_best_move_effort;
-
-    if (rootMoveCount == 1)
-        target = std::min(561.7, target);
-
-    optimum_time = clampi(int(target), 1, maximum_time);
+    if (score_is_stable) {
+        ++score_stability;
+    }
+    else {
+        score_stability = 0;
+    }
 
     previous_score = bestScore;
-    iter_scores[iter_score_index] = bestScore;
-    iter_score_index = (iter_score_index + 1) & 3;
-    previous_time_reduction = time_reduction;
+    has_previous_score = true;
+
+    const double nodes_ratio = clampd(
+        double(bestMoveNodes) / double(std::max<uint64_t>(1, totalNodes)),
+        0.0,
+        1.0);
+
+    double target = double(base_optimum_time);
+    target *= 2.0 - 1.5 * nodes_ratio;
+    target *= 1.25 - 0.05 * double(pv_stability);
+
+    if (depth >= SCORE_STABILITY_MIN_DEPTH) {
+        const double score_factor = std::max(
+            SCORE_STABILITY_BASE - SCORE_STABILITY_MUL * double(score_stability),
+            SCORE_STABILITY_MIN);
+        target *= score_factor;
+    }
+
+    target = std::max(target, double(base_optimum_time) * 0.75);
+
+    optimum_time = std::max(1, int(target));
 }
 
 void TimeManager::start() {
@@ -235,6 +195,9 @@ bool TimeManager::should_stop() const {
         return false;
 
     if (optimum_time <= 0)
+        return false;
+
+    if (!fixed_movetime && completed_depth < 4)
         return false;
 
     return elapsed() >= optimum_time;
@@ -259,19 +222,5 @@ int TimeManager::maximum() const {
 }
 
 uint64_t TimeManager::poll_interval_mask() const {
-    if (infinite_mode)
-        return 4095ULL;
-
-    const int budget = optimum_time > 0 ? optimum_time : maximum_time;
-
-    if (budget <= 0)    return 1023ULL;
-    if (budget <= 10)   return 7ULL;
-    if (budget <= 25)   return 15ULL;
-    if (budget <= 50)   return 31ULL;
-    if (budget <= 100)  return 63ULL;
-    if (budget <= 250)  return 127ULL;
-    if (budget <= 1000) return 255ULL;
-    if (budget <= 5000) return 511ULL;
-
-    return 1023ULL;
+    return 4095ULL;
 }

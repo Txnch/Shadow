@@ -65,31 +65,6 @@ static inline bool ep_should_be_hashed(const Position& pos, Color stm, Square ep
     return ep_capturable(stm, epSq, pawns);
 }
 
-static inline uint64_t key_at_distance(const Position& pos, int dist)
-{
-    if (dist <= 0)
-        return pos.hash();
-
-    const int idx = pos.history_size() - dist;
-    if (idx < 0)
-        return 0;
-
-    return pos.history_key(idx);
-}
-
-static inline int plies_since_last_null(const Position& pos, int limit)
-{
-    const int maxPlies = std::min(limit, pos.history_size());
-    int d = 0;
-    for (; d < maxPlies; ++d)
-    {
-        const int idx = pos.history_size() - 1 - d;
-        if (pos.history_is_null(idx))
-            break;
-    }
-    return d;
-}
-
 static inline bool squares_aligned(Square a, Square b, Square c)
 {
     const int af = int(file_of(a));
@@ -110,8 +85,11 @@ static inline bool squares_aligned(Square a, Square b, Square c)
     return false;
 }
 
-static Bitboard between_squares(Square a, Square b)
+static Bitboard compute_between_squares(Square a, Square b)
 {
+    if (a == b)
+        return BB_EMPTY;
+
     const int af = int(file_of(a));
     const int ar = int(rank_of(a));
     const int bf = int(file_of(b));
@@ -143,6 +121,16 @@ static Bitboard between_squares(Square a, Square b)
     return out & ~square_bb(a) & ~square_bb(b);
 }
 
+static Bitboard BetweenBB[SQUARE_NB][SQUARE_NB];
+
+static int init_between_bb = []() {
+    for (int a = 0; a < 64; ++a)
+        for (int b = 0; b < 64; ++b)
+            BetweenBB[a][b] = compute_between_squares(Square(a), Square(b));
+
+    return 0;
+    }();
+
 static inline void aux_xor_piece_keys(Piece p, uint64_t z, uint64_t& pawnKey, std::array<uint64_t, COLOR_NB>& nonPawnKeys) {
     if (piece_type(p) == PAWN) {
         pawnKey ^= z;
@@ -152,32 +140,30 @@ static inline void aux_xor_piece_keys(Piece p, uint64_t z, uint64_t& pawnKey, st
     }
 }
 
-static void compute_blockers_for_king(const Position& pos,
-    Color kingColor,
+static void compute_blockers_for_king(Square ksq,
+    Bitboard ownPieces,
+    Bitboard occupiedAll,
+    Bitboard enemyRQ,
+    Bitboard enemyBQ,
     Bitboard& blockers,
     Bitboard& pinnersOfEnemy)
 {
     blockers = BB_EMPTY;
     pinnersOfEnemy = BB_EMPTY;
 
-    const Square ksq = pos.king_square(kingColor);
     if (ksq == SQ_NONE)
         return;
 
-    const Color enemy = ~kingColor;
-    const Bitboard enemyRQ = (pos.pieces(enemy) & (pos.pieces(ROOK) | pos.pieces(QUEEN)));
-    const Bitboard enemyBQ = (pos.pieces(enemy) & (pos.pieces(BISHOP) | pos.pieces(QUEEN)));
-
     Bitboard snipers = (get_rook_attacks(ksq, BB_EMPTY) & enemyRQ)
         | (get_bishop_attacks(ksq, BB_EMPTY) & enemyBQ);
-    const Bitboard occupied = pos.all_pieces() & ~snipers;
+    const Bitboard occupied = occupiedAll & ~snipers;
 
     while (snipers) {
         const Square sniperSq = pop_lsb(snipers);
-        const Bitboard between = between_squares(ksq, sniperSq) & occupied;
-        if (popcount(between) == 1) {
+        const Bitboard between = BetweenBB[ksq][sniperSq] & occupied;
+        if (between && !(between & (between - 1))) {
             blockers |= between;
-            if (between & pos.pieces(kingColor))
+            if (between & ownPieces)
                 pinnersOfEnemy |= square_bb(sniperSq);
         }
     }
@@ -214,6 +200,7 @@ void Position::clear() {
     ep = SQ_NONE;
     castling_right = NO_CASTLING;
     ply = 0;
+    last_null_ply = -1;
     hash_key = 0;
     pawn_hash_key = 0;
     non_pawn_hash_key = { 0, 0 };
@@ -558,6 +545,64 @@ bool Position::is_pseudo_legal(Move m) const {
         return false;
     }
 }
+
+bool Position::is_legal(Move m) const {
+    if (!is_pseudo_legal(m))
+        return false;
+
+    if (is_castling(m))
+        return true;
+
+    const Square from = from_sq(m);
+    const Square to = to_sq(m);
+    const Piece mover = board[from];
+    const Color us = side;
+    const Color them = ~us;
+
+    if (mover == NO_PIECE || piece_color(mover) != us)
+        return false;
+
+    Square capturedSq = to;
+    if (is_en_passant(m))
+        capturedSq = us == WHITE ? Square(int(to) - 8) : Square(int(to) + 8);
+
+    const Piece captured = is_capture(m) ? board[capturedSq] : NO_PIECE;
+    if (captured != NO_PIECE && piece_type(captured) == KING)
+        return false;
+
+    const Bitboard fromBB = square_bb(from);
+    const Bitboard toBB = square_bb(to);
+    const Bitboard capturedBB = captured != NO_PIECE ? square_bb(capturedSq) : BB_EMPTY;
+
+    Bitboard occAfter = occ_all;
+    occAfter &= ~fromBB;
+    occAfter &= ~capturedBB;
+    occAfter |= toBB;
+
+    const Square ksq = piece_type(mover) == KING ? to : king_square(us);
+    if (ksq == SQ_NONE)
+        return false;
+
+    const Bitboard enemyPieces = occ[them] & ~capturedBB;
+
+    if (PawnAttacks[us][ksq] & (enemyPieces & pieces(PAWN)))
+        return false;
+
+    if (KnightAttacks[ksq] & (enemyPieces & pieces(KNIGHT)))
+        return false;
+
+    if (KingAttacks[ksq] & (enemyPieces & pieces(KING)))
+        return false;
+
+    if (get_bishop_attacks(ksq, occAfter) & (enemyPieces & (pieces(BISHOP) | pieces(QUEEN))))
+        return false;
+
+    if (get_rook_attacks(ksq, occAfter) & (enemyPieces & (pieces(ROOK) | pieces(QUEEN))))
+        return false;
+
+    return true;
+}
+
 bool Position::gives_check(Move m) const {
     if (!m)
         return false;
@@ -602,13 +647,14 @@ bool Position::gives_check(Move m) const {
 
 bool Position::is_repetition_draw(int ply_from_root) const
 {
-    const int maxDist = std::min(halfmove_clock(),
-        plies_since_last_null(*this, history_size()));
+    const int plies_since_null = last_null_ply >= 0 ? ply - 1 - last_null_ply : ply;
+    const int maxDist = std::min(halfmove_clock_state, plies_since_null);
+    const uint64_t current_key = hash_key;
 
     bool hitBeforeRoot = false;
     for (int i = 4; i <= maxDist; i += 2)
     {
-        if (hash() == key_at_distance(*this, i))
+        if (current_key == history[ply - i].hash_key)
         {
             if (ply_from_root >= i)
                 return true;
@@ -629,16 +675,55 @@ void Position::refresh_check_info() {
     blockers_for_king_bb[BLACK] = BB_EMPTY;
     pinners_bb[WHITE] = BB_EMPTY;
     pinners_bb[BLACK] = BB_EMPTY;
-    check_squares_bb.fill(BB_EMPTY);
+    check_squares_bb[NO_PIECE_TYPE] = BB_EMPTY;
+    check_squares_bb[PAWN] = BB_EMPTY;
+    check_squares_bb[KNIGHT] = BB_EMPTY;
+    check_squares_bb[BISHOP] = BB_EMPTY;
+    check_squares_bb[ROOK] = BB_EMPTY;
+    check_squares_bb[QUEEN] = BB_EMPTY;
+    check_squares_bb[KING] = BB_EMPTY;
 
-    const Square stmKing = king_square(side);
-    if (stmKing != SQ_NONE)
-        checkers_bb = attackers_to(*this, stmKing, occ_all, ~side);
+    const Square whiteKing = king_square(WHITE);
+    const Square blackKing = king_square(BLACK);
 
-    compute_blockers_for_king(*this, WHITE, blockers_for_king_bb[WHITE], pinners_bb[BLACK]);
-    compute_blockers_for_king(*this, BLACK, blockers_for_king_bb[BLACK], pinners_bb[WHITE]);
+    const Bitboard pawns = piece_bb[W_PAWN] | piece_bb[B_PAWN];
+    const Bitboard knights = piece_bb[W_KNIGHT] | piece_bb[B_KNIGHT];
+    const Bitboard bishops = piece_bb[W_BISHOP] | piece_bb[B_BISHOP];
+    const Bitboard rooks = piece_bb[W_ROOK] | piece_bb[B_ROOK];
+    const Bitboard queens = piece_bb[W_QUEEN] | piece_bb[B_QUEEN];
+    const Bitboard kings = piece_bb[W_KING] | piece_bb[B_KING];
+    const Bitboard bishopsQueens = bishops | queens;
+    const Bitboard rooksQueens = rooks | queens;
 
-    const Square enemyKing = king_square(~side);
+    const Square stmKing = side == WHITE ? whiteKing : blackKing;
+    if (stmKing != SQ_NONE) {
+        const Color enemy = ~side;
+        const Bitboard enemyPieces = occ[enemy];
+
+        checkers_bb |= PawnAttacks[side][stmKing] & enemyPieces & pawns;
+        checkers_bb |= KnightAttacks[stmKing] & enemyPieces & knights;
+        checkers_bb |= KingAttacks[stmKing] & enemyPieces & kings;
+        checkers_bb |= get_bishop_attacks(stmKing, occ_all) & enemyPieces & bishopsQueens;
+        checkers_bb |= get_rook_attacks(stmKing, occ_all) & enemyPieces & rooksQueens;
+    }
+
+    compute_blockers_for_king(whiteKing,
+        occ[WHITE],
+        occ_all,
+        occ[BLACK] & rooksQueens,
+        occ[BLACK] & bishopsQueens,
+        blockers_for_king_bb[WHITE],
+        pinners_bb[BLACK]);
+
+    compute_blockers_for_king(blackKing,
+        occ[BLACK],
+        occ_all,
+        occ[WHITE] & rooksQueens,
+        occ[WHITE] & bishopsQueens,
+        blockers_for_king_bb[BLACK],
+        pinners_bb[WHITE]);
+
+    const Square enemyKing = side == WHITE ? blackKing : whiteKing;
     if (enemyKing == SQ_NONE)
         return;
 
@@ -650,11 +735,11 @@ void Position::refresh_check_info() {
     check_squares_bb[KING] = BB_EMPTY;
 }
 
-bool Position::make_move(Move m) {
+bool Position::make_move(Move m, bool assume_pseudo_legal) {
     if (ply >= MAX_GAME_PLY - 1)
         return false;
 
-    if (!is_pseudo_legal(m))
+    if (!assume_pseudo_legal && !is_pseudo_legal(m))
         return false;
 
     Square from = from_sq(m);
@@ -674,6 +759,7 @@ bool Position::make_move(Move m) {
     u.non_pawn_key[BLACK] = non_pawn_hash_key[BLACK];
     u.halfmove_clock = halfmove_clock_state;
     u.fullmove_number = fullmove_number_state;
+    u.previous_null_ply = last_null_ply;
 
     u.ep_square = ep;
     u.castling_rights = castling_right;
@@ -812,6 +898,7 @@ void Position::undo_move() {
     Move m = u.move;
     halfmove_clock_state = u.halfmove_clock;
     fullmove_number_state = u.fullmove_number;
+    last_null_ply = u.previous_null_ply;
 
     Square from = from_sq(m);
     Square to = to_sq(m);
@@ -882,6 +969,7 @@ void Position::undo_move() {
 void Position::do_null_move() {
     assert(ply < MAX_GAME_PLY);
 
+    const int null_ply = ply;
     Undo& u = history[ply++];
 
     u.is_null = true;
@@ -896,6 +984,7 @@ void Position::do_null_move() {
     u.non_pawn_key[BLACK] = non_pawn_hash_key[BLACK];
     u.halfmove_clock = halfmove_clock_state;
     u.fullmove_number = fullmove_number_state;
+    u.previous_null_ply = last_null_ply;
     u.dp = {};
 
 
@@ -906,6 +995,7 @@ void Position::do_null_move() {
 
     side = ~side;
     hash_key ^= zobrist_side;
+    last_null_ply = null_ply;
     refresh_check_info();
 
 }
@@ -924,6 +1014,7 @@ void Position::undo_null_move() {
     non_pawn_hash_key[BLACK] = u.non_pawn_key[BLACK];
     halfmove_clock_state = u.halfmove_clock;
     fullmove_number_state = u.fullmove_number;
+    last_null_ply = u.previous_null_ply;
     refresh_check_info();
 }
 

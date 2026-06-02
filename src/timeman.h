@@ -52,13 +52,11 @@ private:
     int base_optimum_time;
 
     uint32_t previous_best_move;
-    int last_best_move_depth;
     int previous_score;
+    int completed_depth;
+    int pv_stability;
+    int score_stability;
     bool has_previous_score;
-    double total_best_move_changes;
-    double previous_time_reduction;
-    int iter_scores[4];
-    int iter_score_index;
 
     std::chrono::steady_clock::time_point start_time;
 };

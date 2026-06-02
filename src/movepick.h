@@ -9,6 +9,10 @@ bool movepick_see_ge(const Position& pos, Move m, int threshold);
 
 class MovePicker {
 public:
+    static constexpr int CONTHIST1_WEIGHT = 124;
+    static constexpr int CONTHIST2_WEIGHT = 127;
+    static constexpr int CONTHIST4_WEIGHT = 77;
+
     struct MainOrderData {
         const int (*history)[64] = nullptr;
         const int (*capture_history)[64][16] = nullptr;

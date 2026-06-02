@@ -20,8 +20,12 @@ int main(int argc, char* argv[])
         init_zobrist();
 
         const bool nnueLoaded = nnue::init("quantised.bin");
-        if (nnueLoaded)
-            std::cout << "info string NNUE load success: quantised.bin\n";
+        if (nnueLoaded) {
+            if (nnue::loaded_from_embedded())
+                std::cout << "info string NNUE load success: embedded nnue\n";
+            else
+                std::cout << "info string NNUE load success: quantised.bin\n";
+        }
         else
             std::cout << "info string NNUE load failed\n";
 

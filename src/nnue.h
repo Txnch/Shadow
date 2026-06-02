@@ -30,6 +30,7 @@ namespace nnue {
 
     bool init(const std::string& filepath);
     bool is_ready();
+    bool loaded_from_embedded();
 
     int evaluate(const Position& pos);
     int evaluate_from_pair(const AccumulatorPair& pair, Color stm);
@@ -43,7 +44,7 @@ namespace nnue {
     void add_sub_feature(int16_t acc[HIDDEN], int add_feat_idx, int sub_feat_idx);
 
     void apply_dirty(int16_t acc[HIDDEN],
-                     Color pov,
-                     const DirtyPieces& dp);
+        Color pov,
+        const DirtyPieces& dp);
 
 }

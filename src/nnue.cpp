@@ -7,12 +7,24 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#if defined(__has_include)
+#if __has_include("nnue_data.h")
+#include "nnue_data.h"
+#define SHADOW_HAS_EMBEDDED_NNUE 1
+#endif
+#endif
+
+#ifndef SHADOW_HAS_EMBEDDED_NNUE
+#define SHADOW_HAS_EMBEDDED_NNUE 0
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -29,17 +41,48 @@ namespace nnue {
     static constexpr int QB = 64;
     static constexpr float NETWORK_SCALE = 400.0f;
 
-    static bool g_ready = false;
+    enum class LoadSource {
+        None,
+        Embedded,
+        File
+    };
 
-    static std::vector<int16_t> g_W1;
-    static std::vector<int16_t> g_b1;
-    static std::vector<int16_t> g_W2;
+    static bool g_ready = false;
+    static LoadSource g_load_source = LoadSource::None;
+
+    static const int16_t* g_W1 = nullptr;
+    static const int16_t* g_b1 = nullptr;
+    static const int16_t* g_W2 = nullptr;
+    static std::vector<int16_t> g_W1_storage;
+    static std::vector<int16_t> g_b1_storage;
+    static std::vector<int16_t> g_W2_storage;
     static float g_b2 = 0.0f;
     static int g_b2_scaled = 0;
+
+    static void clear_network() {
+        g_ready = false;
+        g_load_source = LoadSource::None;
+        g_W1 = nullptr;
+        g_b1 = nullptr;
+        g_W2 = nullptr;
+        g_W1_storage.clear();
+        g_b1_storage.clear();
+        g_W2_storage.clear();
+        g_b2 = 0.0f;
+        g_b2_scaled = 0;
+    }
 
     static inline bool read_all(FILE* f, void* dst, size_t bytes) {
         return std::fread(dst, 1, bytes, f) == bytes;
     }
+
+    struct FileReader {
+        FILE* file = nullptr;
+
+        bool read(void* dst, size_t bytes) {
+            return read_all(file, dst, bytes);
+        }
+    };
 
     static std::filesystem::path executable_dir() {
 #if defined(_WIN32)
@@ -74,11 +117,73 @@ namespace nnue {
 #endif
     }
 
-    static inline uint32_t read_u32(FILE* f, bool& ok) {
+    template <typename Reader>
+    static inline uint32_t read_u32(Reader& reader, bool& ok) {
         uint32_t x = 0;
-        ok = read_all(f, &x, sizeof(x));
+        ok = reader.read(&x, sizeof(x));
         return x;
     }
+
+    template <typename Reader>
+    static bool load_network(Reader& reader, LoadSource source) {
+        bool ok = true;
+        const uint32_t magic = read_u32(reader, ok);
+        const uint32_t version = read_u32(reader, ok);
+        const uint32_t inputs = read_u32(reader, ok);
+        const uint32_t hidden = read_u32(reader, ok);
+        const uint32_t qa = read_u32(reader, ok);
+        const uint32_t qb = read_u32(reader, ok);
+
+        if (!ok || magic != MAGIC || version != VERSION_V5_BASIC ||
+            inputs != INPUTS || hidden != HIDDEN || qa != QA || qb != QB) {
+            clear_network();
+            return false;
+        }
+
+        g_W1_storage.assign(INPUTS * HIDDEN, 0);
+        g_b1_storage.assign(HIDDEN, 0);
+        g_W2_storage.assign(2 * HIDDEN, 0);
+
+        if (!reader.read(g_W1_storage.data(), g_W1_storage.size() * sizeof(int16_t)) ||
+            !reader.read(g_b1_storage.data(), g_b1_storage.size() * sizeof(int16_t)) ||
+            !reader.read(g_W2_storage.data(), g_W2_storage.size() * sizeof(int16_t)) ||
+            !reader.read(&g_b2, sizeof(g_b2))) {
+            clear_network();
+            return false;
+        }
+
+        g_W1 = g_W1_storage.data();
+        g_b1 = g_b1_storage.data();
+        g_W2 = g_W2_storage.data();
+        g_b2_scaled = static_cast<int>(std::round(g_b2 * NETWORK_SCALE));
+        g_load_source = source;
+        g_ready = true;
+        return true;
+    }
+
+#if SHADOW_HAS_EMBEDDED_NNUE
+    static bool load_embedded_network() {
+        if (embedded::MAGIC != MAGIC ||
+            embedded::VERSION != VERSION_V5_BASIC ||
+            embedded::INPUTS != INPUTS ||
+            embedded::HIDDEN != HIDDEN ||
+            embedded::QA != QA ||
+            embedded::QB != QB ||
+            embedded::W1_SIZE != static_cast<size_t>(INPUTS * HIDDEN) ||
+            embedded::B1_SIZE != static_cast<size_t>(HIDDEN) ||
+            embedded::W2_SIZE != static_cast<size_t>(2 * HIDDEN))
+            return false;
+
+        g_W1 = embedded::W1;
+        g_b1 = embedded::B1;
+        g_W2 = embedded::W2;
+        g_b2 = std::bit_cast<float>(embedded::B2_BITS);
+        g_b2_scaled = static_cast<int>(std::round(g_b2 * NETWORK_SCALE));
+        g_load_source = LoadSource::Embedded;
+        g_ready = true;
+        return true;
+    }
+#endif
 
     static inline int piece_type_index(PieceType pt) {
         if (pt < PAWN || pt > KING) return -1;
@@ -112,8 +217,8 @@ namespace nnue {
 
     static int evaluate_from_accs(const int16_t acc_stm[HIDDEN],
         const int16_t acc_ntm[HIDDEN]) {
-        int64_t sum = shadow_simd::dot_screlu_i16(acc_stm, g_W2.data(), HIDDEN);
-        sum += shadow_simd::dot_screlu_i16(acc_ntm, g_W2.data() + HIDDEN, HIDDEN);
+        int64_t sum = shadow_simd::dot_screlu_i16(acc_stm, g_W2, HIDDEN);
+        sum += shadow_simd::dot_screlu_i16(acc_ntm, g_W2 + HIDDEN, HIDDEN);
 
         const int64_t scale_num = static_cast<int64_t>(NETWORK_SCALE);
         const int64_t scale_den = static_cast<int64_t>(QA) * QA * QB;
@@ -132,12 +237,14 @@ namespace nnue {
     }
 
     bool init(const std::string& filepath) {
-        g_ready = false;
-        g_W1.clear();
-        g_b1.clear();
-        g_W2.clear();
-        g_b2 = 0.0f;
-        g_b2_scaled = 0;
+        clear_network();
+
+#if SHADOW_HAS_EMBEDDED_NNUE
+        if (load_embedded_network())
+            return true;
+        else
+            clear_network();
+#endif
 
         const std::filesystem::path requestedPath(filepath);
 
@@ -149,46 +256,18 @@ namespace nnue {
         if (!f)
             return false;
 
-        bool ok = true;
-        const uint32_t magic = read_u32(f, ok);
-        const uint32_t version = read_u32(f, ok);
-        const uint32_t inputs = read_u32(f, ok);
-        const uint32_t hidden = read_u32(f, ok);
-        const uint32_t qa = read_u32(f, ok);
-        const uint32_t qb = read_u32(f, ok);
-
-        if (!ok || magic != MAGIC || version != VERSION_V5_BASIC ||
-            inputs != INPUTS || hidden != HIDDEN || qa != QA || qb != QB) {
-            std::fclose(f);
-            return false;
-        }
-
-        g_W1.assign(INPUTS * HIDDEN, 0);
-        g_b1.assign(HIDDEN, 0);
-        g_W2.assign(2 * HIDDEN, 0);
-
-        if (!read_all(f, g_W1.data(), g_W1.size() * sizeof(int16_t)) ||
-            !read_all(f, g_b1.data(), g_b1.size() * sizeof(int16_t)) ||
-            !read_all(f, g_W2.data(), g_W2.size() * sizeof(int16_t)) ||
-            !read_all(f, &g_b2, sizeof(g_b2))) {
-            g_W1.clear();
-            g_b1.clear();
-            g_W2.clear();
-            g_b2 = 0.0f;
-            g_b2_scaled = 0;
-            std::fclose(f);
-            return false;
-        }
-
-        g_b2_scaled = static_cast<int>(std::round(g_b2 * NETWORK_SCALE));
-
+        FileReader fileReader{ f };
+        const bool loaded = load_network(fileReader, LoadSource::File);
         std::fclose(f);
-        g_ready = true;
-        return true;
+        return loaded;
     }
 
     bool is_ready() {
         return g_ready;
+    }
+
+    bool loaded_from_embedded() {
+        return g_ready && g_load_source == LoadSource::Embedded;
     }
 
     int feature_index_stm_manual(Color pov, Piece pc, Square sq) {
@@ -201,7 +280,7 @@ namespace nnue {
             return;
         }
 
-        shadow_simd::copy_i16(out_acc, g_b1.data(), HIDDEN);
+        shadow_simd::copy_i16(out_acc, g_b1, HIDDEN);
 
         Bitboard occ = pos.all_pieces();
         while (occ) {
