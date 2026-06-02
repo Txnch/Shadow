@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" width="350">
+</p>
+
 # Shadow
 
 Shadow is a chess engine written in C++.
