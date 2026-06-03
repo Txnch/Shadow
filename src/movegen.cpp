@@ -1,5 +1,4 @@
 #include "movegen.h"
-#include "attacks.h"
 #include <cstdlib>
 #include "bitboard.h"
 

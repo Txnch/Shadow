@@ -1,5 +1,4 @@
 #include "position.h"
-#include "attacks.h"
 #include "bitboard.h"
 #include "nnue.h"
 
@@ -15,6 +14,95 @@ uint64_t zobrist_piece[PIECE_NB][64];
 uint64_t zobrist_side;
 uint64_t zobrist_castling[16];
 uint64_t zobrist_ep[64];
+
+Bitboard PawnAttacks[COLOR_NB][SQUARE_NB];
+Bitboard KnightAttacks[SQUARE_NB];
+Bitboard KingAttacks[SQUARE_NB];
+
+void init_attacks() {
+    for (int c = 0; c < COLOR_NB; ++c)
+        for (int s = 0; s < SQUARE_NB; ++s)
+            PawnAttacks[c][s] = BB_EMPTY;
+
+    for (int s = 0; s < SQUARE_NB; ++s) {
+        KnightAttacks[s] = BB_EMPTY;
+        KingAttacks[s] = BB_EMPTY;
+    }
+
+    for (int s = 0; s < 64; ++s) {
+        const Square sq = Square(s);
+        const Bitboard b = square_bb(sq);
+
+        PawnAttacks[WHITE][s] = north_east(b) | north_west(b);
+        PawnAttacks[BLACK][s] = south_east(b) | south_west(b);
+    }
+
+    for (int s = 0; s < 64; ++s) {
+        Bitboard attacks = BB_EMPTY;
+        const int r = s / 8;
+        const int f = s % 8;
+
+        auto add = [&](int dr, int df) {
+            const int rr = r + dr;
+            const int ff = f + df;
+
+            if (rr >= 0 && rr < 8 && ff >= 0 && ff < 8)
+                attacks |= 1ULL << (rr * 8 + ff);
+            };
+
+        add(2, 1);
+        add(2, -1);
+        add(-2, 1);
+        add(-2, -1);
+        add(1, 2);
+        add(1, -2);
+        add(-1, 2);
+        add(-1, -2);
+
+        KnightAttacks[s] = attacks;
+    }
+
+    for (int s = 0; s < 64; ++s) {
+        const Square sq = Square(s);
+        const Bitboard b = square_bb(sq);
+
+        KingAttacks[s] = north(b) | south(b) | east(b) | west(b)
+            | north_east(b) | north_west(b) | south_east(b) | south_west(b);
+    }
+}
+
+bool is_square_attacked(const Position& pos, Square sq, Color by) {
+    if (PawnAttacks[~by][sq] & (pos.pieces(PAWN) & pos.pieces(by)))
+        return true;
+
+    if (KnightAttacks[sq] & pos.pieces(KNIGHT) & pos.pieces(by))
+        return true;
+
+    if (KingAttacks[sq] & pos.pieces(KING) & pos.pieces(by))
+        return true;
+
+    const Bitboard occ = pos.pieces(WHITE) | pos.pieces(BLACK);
+    const Bitboard bishopsQueens = (pos.pieces(BISHOP) | pos.pieces(QUEEN)) & pos.pieces(by);
+    if (get_bishop_attacks(sq, occ) & bishopsQueens)
+        return true;
+
+    const Bitboard rooksQueens = (pos.pieces(ROOK) | pos.pieces(QUEEN)) & pos.pieces(by);
+    if (get_rook_attacks(sq, occ) & rooksQueens)
+        return true;
+
+    return false;
+}
+
+bool in_check(const Position& pos, Color c) {
+    if (c == pos.side_to_move())
+        return pos.checkers() != BB_EMPTY;
+
+    const Bitboard king = pos.pieces(KING) & pos.pieces(c);
+    if (!king)
+        return false;
+
+    return is_square_attacked(pos, lsb(king), ~c);
+}
 
 static inline bool ep_capturable(Color stm, Square epSq, Bitboard pawns)
 {

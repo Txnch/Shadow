@@ -1,6 +1,4 @@
 #include "movepick.h"
-
-#include "attacks.h"
 #include "evaluate.h"
 #include "movegen.h"
 #include "bitboard.h"

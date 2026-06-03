@@ -2,7 +2,6 @@
 #include <iostream>
 #include <string>
 
-#include "attacks.h"
 #include "bitboard.h"
 #include "position.h"
 #include "nnue.h"

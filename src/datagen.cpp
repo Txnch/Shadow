@@ -1,6 +1,4 @@
 #include "datagen.h"
-
-#include "attacks.h"
 #include "movegen.h"
 #include "position.h"
 #include "search.h"

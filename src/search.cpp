@@ -2,7 +2,6 @@
 #include "movegen.h"
 #include "movepick.h"
 #include "evaluate.h"
-#include "attacks.h"
 #include "move.h"
 #include "timeman.h"
 #include "tt.h"

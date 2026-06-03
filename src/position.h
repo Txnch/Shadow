@@ -56,13 +56,7 @@ public:
     uint64_t non_pawn_key(Color c) const { return non_pawn_hash_key[c]; }
 
     int current_ply() const { return ply; }
-    const Undo& last_undo() const { return history[ply - 1]; }
     const Undo& state_at_ply(int p) const { return history[p]; }
-
-    uint64_t history_key(int index) const { return history[index].hash_key; }
-    int history_size() const { return ply; }
-
-    bool history_is_null(int index) const { return history[index].is_null; }
 
     Bitboard checkers() const { return (side < COLOR_NB) ? checkers_bb : BB_EMPTY; }
     Bitboard blockers_for_king(Color c) const { return blockers_for_king_bb[c]; }
@@ -99,4 +93,11 @@ private:
     void refresh_check_info();
 };
 
+extern Bitboard PawnAttacks[COLOR_NB][SQUARE_NB];
+extern Bitboard KnightAttacks[SQUARE_NB];
+extern Bitboard KingAttacks[SQUARE_NB];
+
+void init_attacks();
 void init_zobrist();
+bool is_square_attacked(const Position& pos, Square sq, Color by);
+bool in_check(const Position& pos, Color c);
