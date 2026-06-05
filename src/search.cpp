@@ -434,6 +434,11 @@ static inline int eval_from_stack(const Position& pos, SearchStack* ss, int ply)
     return evaluate(pos);
 }
 
+static inline int scale_rule50_eval(int eval, const Position& pos)
+{
+    return eval * (200 - std::min(pos.halfmove_clock(), 200)) / 200;
+}
+
 static inline void seed_root_accumulator(const Position& pos, SearchStack* ss)
 {
     ss[0].acc_valid = false;
@@ -556,7 +561,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     if (!inChk)
     {
         raw_eval = qtt ? qtt->static_eval : eval_from_stack(pos, ss, ply);
-        stand_pat = raw_eval + get_eval_correction(pos, ss, ply);
+        stand_pat = scale_rule50_eval(raw_eval, pos) + get_eval_correction(pos, ss, ply);
 
         stand_pat = std::clamp(stand_pat, -MATE_SCORE + 1000, MATE_SCORE - 1000);
 
@@ -728,6 +733,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     int staticEval = raw_eval;
 
     if (!inChk) {
+        staticEval = scale_rule50_eval(staticEval, pos);
         staticEval += get_eval_correction(pos, ss, ply);
 
         if (pos.pieces(PAWN) == 0 && std::abs(staticEval) < MATE_SCORE - 1000) {
