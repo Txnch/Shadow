@@ -3,14 +3,14 @@
 #include "bitboard.h"
 
 
-static inline bool is_empty(const Position& pos, Square s) {
-    return s >= SQ_A1 && s <= SQ_H8 && pos.piece_on(s) == NO_PIECE;
-}
-
-static inline bool is_enemy(const Position& pos, Square s, Color us) {
-    if (s < SQ_A1 || s > SQ_H8) return false;
-    Piece p = pos.piece_on(s);
-    return p != NO_PIECE && piece_color(p) != us;
+static inline void push_targets(Square from, Bitboard targets, Bitboard enemy, MoveList& list) {
+    while (targets) {
+        const Square to = pop_lsb(targets);
+        if (square_bb(to) & enemy)
+            list.push(make_move(from, to, MOVE_CAPTURE));
+        else
+            list.push(make_move(from, to));
+    }
 }
 
 static void gen_pawn_moves(const Position& pos, MoveList& list) {
@@ -19,6 +19,7 @@ static void gen_pawn_moves(const Position& pos, MoveList& list) {
     Color them = ~us;
 
     Bitboard pawns = pos.pieces(PAWN) & pos.pieces(us);
+    const Bitboard occ = pos.all_pieces();
 
     int dir = (us == WHITE) ? 8 : -8;
     int start_rank = (us == WHITE) ? RANK_2 : RANK_7;
@@ -33,7 +34,7 @@ static void gen_pawn_moves(const Position& pos, MoveList& list) {
 
             Square to = Square(to_int);
 
-            if (is_empty(pos, to)) {
+            if (!(occ & square_bb(to))) {
 
                 if (rank_of(to) == promo_rank) {
                     list.push(make_promotion(from, to, QUEEN));
@@ -48,7 +49,7 @@ static void gen_pawn_moves(const Position& pos, MoveList& list) {
                         int to2_int = to_int + dir;
                         if (to2_int >= 0 && to2_int < 64) {
                             Square to2 = Square(to2_int);
-                            if (is_empty(pos, to2))
+                            if (!(occ & square_bb(to2)))
                                 list.push(make_move(from, to2, MOVE_DOUBLE_PUSH));
                         }
                     }
@@ -83,6 +84,7 @@ static void gen_pawn_quiets(const Position& pos, MoveList& list) {
 
     const Color us = pos.side_to_move();
     const Bitboard pawns = pos.pieces(PAWN) & pos.pieces(us);
+    const Bitboard occ = pos.all_pieces();
     const int dir = (us == WHITE) ? 8 : -8;
     const int start_rank = (us == WHITE) ? RANK_2 : RANK_7;
     const int promo_rank = (us == WHITE) ? RANK_8 : RANK_1;
@@ -95,7 +97,7 @@ static void gen_pawn_quiets(const Position& pos, MoveList& list) {
             continue;
 
         const Square to = Square(to_int);
-        if (!is_empty(pos, to))
+        if (occ & square_bb(to))
             continue;
 
         if (rank_of(to) == promo_rank)
@@ -107,7 +109,7 @@ static void gen_pawn_quiets(const Position& pos, MoveList& list) {
             const int to2_int = to_int + dir;
             if (to2_int >= 0 && to2_int < 64) {
                 const Square to2 = Square(to2_int);
-                if (is_empty(pos, to2))
+                if (!(occ & square_bb(to2)))
                     list.push(make_move(from, to2, MOVE_DOUBLE_PUSH));
             }
         }
@@ -117,37 +119,28 @@ static void gen_pawn_quiets(const Position& pos, MoveList& list) {
 static void gen_knight_moves(const Position& pos, MoveList& list) {
 
     Color us = pos.side_to_move();
+    const Bitboard own = pos.pieces(us);
+    const Bitboard enemy = pos.pieces(~us);
     Bitboard bb = pos.pieces(KNIGHT) & pos.pieces(us);
 
     while (bb) {
         Square from = pop_lsb(bb);
-        Bitboard attacks = KnightAttacks[from];
-
-        while (attacks) {
-            Square to = pop_lsb(attacks);
-
-            if (is_empty(pos, to))
-                list.push(make_move(from, to));
-            else if (is_enemy(pos, to, us))
-                list.push(make_move(from, to, MOVE_CAPTURE));
-        }
+        Bitboard targets = KnightAttacks[from] & ~own;
+        push_targets(from, targets, enemy, list);
     }
 }
 
 static void gen_knight_quiets(const Position& pos, MoveList& list) {
 
     const Color us = pos.side_to_move();
+    const Bitboard occ = pos.all_pieces();
     Bitboard bb = pos.pieces(KNIGHT) & pos.pieces(us);
 
     while (bb) {
         const Square from = pop_lsb(bb);
-        Bitboard attacks = KnightAttacks[from];
-
-        while (attacks) {
-            const Square to = pop_lsb(attacks);
-            if (is_empty(pos, to))
-                list.push(make_move(from, to));
-        }
+        Bitboard targets = KnightAttacks[from] & ~occ;
+        while (targets)
+            list.push(make_move(from, pop_lsb(targets)));
     }
 }
 
@@ -155,22 +148,16 @@ static void gen_king_moves(const Position& pos, MoveList& list) {
 
     Color us = pos.side_to_move();
     Color them = ~us;
+    const Bitboard own = pos.pieces(us);
+    const Bitboard enemy = pos.pieces(them);
 
     Bitboard kbb = pos.pieces(KING) & pos.pieces(us);
     if (!kbb) return;
 
     Square from = lsb(kbb);
 
-    Bitboard attacks = KingAttacks[from];
-
-    while (attacks) {
-        Square to = pop_lsb(attacks);
-
-        if (is_empty(pos, to))
-            list.push(make_move(from, to));
-        else if (is_enemy(pos, to, us))
-            list.push(make_move(from, to, MOVE_CAPTURE));
-    }
+    Bitboard targets = KingAttacks[from] & ~own;
+    push_targets(from, targets, enemy, list);
 
     if (in_check(pos, us))
         return;
@@ -223,18 +210,15 @@ static void gen_king_quiets(const Position& pos, MoveList& list) {
 
     const Color us = pos.side_to_move();
     const Color them = ~us;
+    const Bitboard occ = pos.all_pieces();
 
     Bitboard kbb = pos.pieces(KING) & pos.pieces(us);
     if (!kbb) return;
 
     const Square from = lsb(kbb);
-    Bitboard attacks = KingAttacks[from];
-
-    while (attacks) {
-        const Square to = pop_lsb(attacks);
-        if (is_empty(pos, to))
-            list.push(make_move(from, to));
-    }
+    Bitboard targets = KingAttacks[from] & ~occ;
+    while (targets)
+        list.push(make_move(from, pop_lsb(targets)));
 
     if (in_check(pos, us))
         return;
@@ -290,22 +274,16 @@ void generate_moves(const Position& pos, MoveList& list) {
 
     Color us = pos.side_to_move();
     Bitboard occ = pos.pieces(WHITE) | pos.pieces(BLACK);
+    Bitboard own = pos.pieces(us);
+    Bitboard enemy = pos.pieces(~us);
 
     {
         Bitboard bb = pos.pieces(BISHOP) & pos.pieces(us);
 
         while (bb) {
             Square from = pop_lsb(bb);
-            Bitboard attacks = get_bishop_attacks(from, occ);
-
-            while (attacks) {
-                Square to = pop_lsb(attacks);
-
-                if (is_empty(pos, to))
-                    list.push(make_move(from, to));
-                else if (is_enemy(pos, to, us))
-                    list.push(make_move(from, to, MOVE_CAPTURE));
-            }
+            Bitboard targets = get_bishop_attacks(from, occ) & ~own;
+            push_targets(from, targets, enemy, list);
         }
     }
 
@@ -314,16 +292,8 @@ void generate_moves(const Position& pos, MoveList& list) {
 
         while (bb) {
             Square from = pop_lsb(bb);
-            Bitboard attacks = get_rook_attacks(from, occ);
-
-            while (attacks) {
-                Square to = pop_lsb(attacks);
-
-                if (is_empty(pos, to))
-                    list.push(make_move(from, to));
-                else if (is_enemy(pos, to, us))
-                    list.push(make_move(from, to, MOVE_CAPTURE));
-            }
+            Bitboard targets = get_rook_attacks(from, occ) & ~own;
+            push_targets(from, targets, enemy, list);
         }
     }
 
@@ -332,16 +302,8 @@ void generate_moves(const Position& pos, MoveList& list) {
 
         while (bb) {
             Square from = pop_lsb(bb);
-            Bitboard attacks = get_bishop_attacks(from, occ) | get_rook_attacks(from, occ);
-
-            while (attacks) {
-                Square to = pop_lsb(attacks);
-
-                if (is_empty(pos, to))
-                    list.push(make_move(from, to));
-                else if (is_enemy(pos, to, us))
-                    list.push(make_move(from, to, MOVE_CAPTURE));
-            }
+            Bitboard targets = (get_bishop_attacks(from, occ) | get_rook_attacks(from, occ)) & ~own;
+            push_targets(from, targets, enemy, list);
         }
     }
 
@@ -362,12 +324,9 @@ void generate_quiets(const Position& pos, MoveList& list) {
         Bitboard bb = pos.pieces(BISHOP) & pos.pieces(us);
         while (bb) {
             const Square from = pop_lsb(bb);
-            Bitboard attacks = get_bishop_attacks(from, occ);
-            while (attacks) {
-                const Square to = pop_lsb(attacks);
-                if (is_empty(pos, to))
-                    list.push(make_move(from, to));
-            }
+            Bitboard targets = get_bishop_attacks(from, occ) & ~occ;
+            while (targets)
+                list.push(make_move(from, pop_lsb(targets)));
         }
     }
 
@@ -375,12 +334,9 @@ void generate_quiets(const Position& pos, MoveList& list) {
         Bitboard bb = pos.pieces(ROOK) & pos.pieces(us);
         while (bb) {
             const Square from = pop_lsb(bb);
-            Bitboard attacks = get_rook_attacks(from, occ);
-            while (attacks) {
-                const Square to = pop_lsb(attacks);
-                if (is_empty(pos, to))
-                    list.push(make_move(from, to));
-            }
+            Bitboard targets = get_rook_attacks(from, occ) & ~occ;
+            while (targets)
+                list.push(make_move(from, pop_lsb(targets)));
         }
     }
 
@@ -388,12 +344,9 @@ void generate_quiets(const Position& pos, MoveList& list) {
         Bitboard bb = pos.pieces(QUEEN) & pos.pieces(us);
         while (bb) {
             const Square from = pop_lsb(bb);
-            Bitboard attacks = get_bishop_attacks(from, occ) | get_rook_attacks(from, occ);
-            while (attacks) {
-                const Square to = pop_lsb(attacks);
-                if (is_empty(pos, to))
-                    list.push(make_move(from, to));
-            }
+            Bitboard targets = (get_bishop_attacks(from, occ) | get_rook_attacks(from, occ)) & ~occ;
+            while (targets)
+                list.push(make_move(from, pop_lsb(targets)));
         }
     }
 
@@ -439,7 +392,7 @@ void generate_captures(const Position& pos, MoveList& list)
         if (to_int >= 0 && to_int < 64)
         {
             const Square to = Square(to_int);
-            if (rank_of(to) == promo_rank && pos.piece_on(to) == NO_PIECE)
+            if (rank_of(to) == promo_rank && !(pos.all_pieces() & square_bb(to)))
             {
                 list.push(make_promotion(from, to, QUEEN));
                 list.push(make_promotion(from, to, ROOK));

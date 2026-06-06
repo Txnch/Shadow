@@ -2,12 +2,21 @@
 #include <cassert>
 #include <cstring>
 
+#if defined(SHADOW_USE_BMI2)
+#include <immintrin.h>
+#endif
 
-static U64 bishop_masks[64]; 
-static U64 rook_masks[64]; 
+#if defined(SHADOW_USE_BMI2)
+#pragma message("Shadow bitboard: BMI2 enabled")
+#else
+#pragma message("Shadow bitboard: magic bitboards enabled")
+#endif
 
-static U64 bishop_attacks[64][512]; 
-static U64 rook_attacks[64][4096]; 
+static U64 bishop_masks[64];
+static U64 rook_masks[64];
+
+static U64 bishop_attacks[64][512];
+static U64 rook_attacks[64][4096];
 
 int rook_relevant_bits[64] = {
     12, 11, 11, 11, 11, 11, 11, 12,
@@ -18,7 +27,7 @@ int rook_relevant_bits[64] = {
     11, 10, 10, 10, 10, 10, 10, 11,
     11, 10, 10, 10, 10, 10, 10, 11,
     12, 11, 11, 11, 11, 11, 11, 12
-}; 
+};
 
 int bishop_relevant_bits[64] = {
     6, 5, 5, 5, 5, 5, 5, 6,
@@ -29,11 +38,29 @@ int bishop_relevant_bits[64] = {
     5, 5, 7, 7, 7, 7, 5, 5,
     5, 5, 5, 5, 5, 5, 5, 5,
     6, 5, 5, 5, 5, 5, 5, 6
-}; 
+};
 
-static U64 mask_bishop(int sq); 
-static U64 mask_rook(int sq); 
-static U64 set_occupancy(int index, int bits, U64 mask); 
+static U64 mask_bishop(int sq);
+static U64 mask_rook(int sq);
+static U64 set_occupancy(int index, int bits, U64 mask);
+
+static inline U64 bishop_attack_index(int sq, U64 occ) {
+    occ &= bishop_masks[sq];
+#if defined(SHADOW_USE_BMI2)
+    return _pext_u64(occ, bishop_masks[sq]);
+#else
+    return (occ * bishop_magics[sq]) >> (64 - bishop_relevant_bits[sq]);
+#endif
+}
+
+static inline U64 rook_attack_index(int sq, U64 occ) {
+    occ &= rook_masks[sq];
+#if defined(SHADOW_USE_BMI2)
+    return _pext_u64(occ, rook_masks[sq]);
+#else
+    return (occ * rook_magics[sq]) >> (64 - rook_relevant_bits[sq]);
+#endif
+}
 
 U64 bishop_attacks_occ(int sq, U64 occ) {
     U64 attacks = 0ULL;
@@ -61,7 +88,7 @@ U64 bishop_attacks_occ(int sq, U64 occ) {
         if (occ & (1ULL << s)) break;
     }
     return attacks;
-} 
+}
 
 U64 rook_attacks_occ(int sq, U64 occ) {
     U64 attacks = 0ULL;
@@ -89,7 +116,7 @@ U64 rook_attacks_occ(int sq, U64 occ) {
         if (occ & (1ULL << s)) break;
     }
     return attacks;
-} 
+}
 
 void init_magic() {
     memset(bishop_attacks, 0, sizeof(bishop_attacks));
@@ -102,7 +129,7 @@ void init_magic() {
         for (int i = 0; i < bishop_occ; i++) {
             U64 occ = set_occupancy(i, bishop_relevant_bits[sq], bishop_masks[sq]);
             U64 attack = bishop_attacks_occ(sq, occ);
-            U64 index = (occ * bishop_magics[sq]) >> (64 - bishop_relevant_bits[sq]);
+            U64 index = bishop_attack_index(sq, occ);
             bishop_attacks[sq][index] = attack;
         }
 
@@ -110,25 +137,19 @@ void init_magic() {
         for (int i = 0; i < rook_occ; i++) {
             U64 occ = set_occupancy(i, rook_relevant_bits[sq], rook_masks[sq]);
             U64 attack = rook_attacks_occ(sq, occ);
-            U64 index = (occ * rook_magics[sq]) >> (64 - rook_relevant_bits[sq]);
+            U64 index = rook_attack_index(sq, occ);
             rook_attacks[sq][index] = attack;
         }
     }
-} 
+}
 
 U64 get_bishop_attacks(int sq, U64 occ) {
-    occ &= bishop_masks[sq];
-    occ *= bishop_magics[sq];
-    occ >>= (64 - bishop_relevant_bits[sq]);
-    return bishop_attacks[sq][occ];
-} 
+    return bishop_attacks[sq][bishop_attack_index(sq, occ)];
+}
 
 U64 get_rook_attacks(int sq, U64 occ) {
-    occ &= rook_masks[sq];
-    occ *= rook_magics[sq];
-    occ >>= (64 - rook_relevant_bits[sq]);
-    return rook_attacks[sq][occ];
-} 
+    return rook_attacks[sq][rook_attack_index(sq, occ)];
+}
 
 static U64 mask_bishop(int sq) {
     U64 attacks = 0ULL;
@@ -145,7 +166,7 @@ static U64 mask_bishop(int sq) {
         attacks |= 1ULL << (r1 * 8 + f1);
 
     return attacks;
-} 
+}
 
 static U64 mask_rook(int sq) {
     U64 attacks = 0ULL;
@@ -158,7 +179,7 @@ static U64 mask_rook(int sq) {
     for (int f1 = f - 1; f1 >= 1; f1--) attacks |= 1ULL << (r * 8 + f1);
 
     return attacks;
-} 
+}
 
 static U64 set_occupancy(int index, int bits, U64 mask) {
     U64 occupancy = 0ULL;
@@ -174,4 +195,4 @@ static U64 set_occupancy(int index, int bits, U64 mask) {
             occupancy |= (1ULL << sq);
     }
     return occupancy;
-} 
+}
