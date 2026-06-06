@@ -210,6 +210,11 @@ void clear_search_state_for_new_game()
     tm.reset();
 }
 
+static int total_pieces(const Position& pos)
+{
+    return popcount(pos.pieces(WHITE) | pos.pieces(BLACK));
+}
+
 static bool has_non_pawn_material(const Position& pos, Color c)
 {
     return (pos.pieces(c) & ~(pos.pieces(PAWN) | pos.pieces(KING))) != 0;
@@ -429,27 +434,6 @@ static inline int eval_from_stack(const Position& pos, SearchStack* ss, int ply)
     return evaluate(pos);
 }
 
-static inline int scale_material_eval(int eval, const Position& pos)
-{
-    constexpr int MAT_SCALE_BASE = 25100;
-    constexpr int MAT_SCALE_PAWN = 110;
-    constexpr int MAT_SCALE_KNIGHT = 340;
-    constexpr int MAT_SCALE_BISHOP = 340;
-    constexpr int MAT_SCALE_ROOK = 590;
-    constexpr int MAT_SCALE_QUEEN = 970;
-    constexpr int MAT_SCALE_DEN = 32768;
-
-    const int material_scale =
-        MAT_SCALE_BASE +
-        popcount(pos.pieces(PAWN)) * MAT_SCALE_PAWN +
-        popcount(pos.pieces(KNIGHT)) * MAT_SCALE_KNIGHT +
-        popcount(pos.pieces(BISHOP)) * MAT_SCALE_BISHOP +
-        popcount(pos.pieces(ROOK)) * MAT_SCALE_ROOK +
-        popcount(pos.pieces(QUEEN)) * MAT_SCALE_QUEEN;
-
-    return static_cast<int>((static_cast<int64_t>(eval) * material_scale) / MAT_SCALE_DEN);
-}
-
 static inline int scale_rule50_eval(int eval, const Position& pos)
 {
     return eval * (200 - std::min(pos.halfmove_clock(), 200)) / 200;
@@ -577,8 +561,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     if (!inChk)
     {
         raw_eval = qtt ? qtt->static_eval : eval_from_stack(pos, ss, ply);
-        stand_pat = scale_material_eval(raw_eval, pos);
-        stand_pat = scale_rule50_eval(stand_pat, pos) + get_eval_correction(pos, ss, ply);
+        stand_pat = scale_rule50_eval(raw_eval, pos) + get_eval_correction(pos, ss, ply);
 
         stand_pat = std::clamp(stand_pat, -MATE_SCORE + 1000, MATE_SCORE - 1000);
 
@@ -750,9 +733,18 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     int staticEval = raw_eval;
 
     if (!inChk) {
-        staticEval = scale_material_eval(staticEval, pos);
         staticEval = scale_rule50_eval(staticEval, pos);
         staticEval += get_eval_correction(pos, ss, ply);
+
+        if (pos.pieces(PAWN) == 0 && std::abs(staticEval) < MATE_SCORE - 1000) {
+            int nonPawnMat = total_pieces(pos);
+            if (nonPawnMat <= 3) {
+                staticEval /= 2;
+            }
+            else if (nonPawnMat <= 5) {
+                staticEval = (staticEval * 3) / 4;
+            }
+        }
 
         staticEval = std::clamp(staticEval, -MATE_SCORE + 1000, MATE_SCORE - 1000);
     }
