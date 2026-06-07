@@ -16,6 +16,7 @@ bool g_silent_search = false;
 
 inline constexpr int INF = 30000;
 inline constexpr int MATE_SCORE = 29000;
+inline constexpr int MAX_EVAL_SCORE = MATE_SCORE - 1000;
 
 inline constexpr int HISTORY_CLAMP = 16384;
 inline constexpr int STAT_BONUS_MAX = 1409;
@@ -91,6 +92,11 @@ static TimeManager tm;
 static inline int draw_score()
 {
     return -1 + (nodes_count & 2);
+}
+
+static inline int clamp_eval_score(int score)
+{
+    return std::clamp(score, -MAX_EVAL_SCORE, MAX_EVAL_SCORE);
 }
 
 static inline void update_history_gravity(int& hist, int bonus)
@@ -426,12 +432,16 @@ static inline void ensure_accumulator(const Position& pos, SearchStack* ss, int 
 
 static inline int eval_from_stack(const Position& pos, SearchStack* ss, int ply)
 {
+    int score = 0;
+
     if (nnue::is_ready()) {
         ensure_accumulator(pos, ss, ply);
-        return nnue::evaluate_from_pair(ss[ply].acc, pos.side_to_move());
+        score = nnue::evaluate_from_pair(ss[ply].acc, pos.side_to_move());
     }
+    else
+        score = evaluate(pos);
 
-    return evaluate(pos);
+    return clamp_eval_score(score);
 }
 
 static inline int scale_rule50_eval(int eval, const Position& pos)
@@ -563,7 +573,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         raw_eval = qtt ? qtt->static_eval : eval_from_stack(pos, ss, ply);
         stand_pat = scale_rule50_eval(raw_eval, pos) + get_eval_correction(pos, ss, ply);
 
-        stand_pat = std::clamp(stand_pat, -MATE_SCORE + 1000, MATE_SCORE - 1000);
+        stand_pat = clamp_eval_score(stand_pat);
 
         ss[ply].static_eval = stand_pat;
 
@@ -746,8 +756,10 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
 
-        staticEval = std::clamp(staticEval, -MATE_SCORE + 1000, MATE_SCORE - 1000);
+        staticEval = clamp_eval_score(staticEval);
     }
+    else
+        staticEval = -INF;
 
     ss[ply].static_eval = staticEval;
 
