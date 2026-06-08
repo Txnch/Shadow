@@ -10,6 +10,7 @@ namespace nnue {
 
     static constexpr int INPUTS = 768;
     static constexpr int HIDDEN = 256;
+    static constexpr int OUTPUT_BUCKETS = 8;
 
     struct AccumulatorPair {
         alignas(64) int16_t white[HIDDEN]{};
@@ -33,7 +34,7 @@ namespace nnue {
     bool loaded_from_embedded();
 
     int evaluate(const Position& pos);
-    int evaluate_from_pair(const AccumulatorPair& pair, Color stm);
+    int evaluate_from_pair(const AccumulatorPair& pair, const Position& pos);
 
     void refresh_acc(const Position& pos, Color pov, int16_t out_acc[HIDDEN]);
 

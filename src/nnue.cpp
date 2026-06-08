@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -36,10 +35,11 @@
 namespace nnue {
 
     static constexpr uint32_t MAGIC = 0x45554E4Eu;
-    static constexpr uint32_t VERSION_V5_BASIC = 5;
+    static constexpr uint32_t VERSION_V6_BUCKETED = 6;
     static constexpr int QA = 255;
     static constexpr int QB = 64;
-    static constexpr float NETWORK_SCALE = 400.0f;
+    static constexpr int BUCKET_DIVISOR = 4;
+    static constexpr int NETWORK_SCALE = 400;
 
     enum class LoadSource {
         None,
@@ -53,11 +53,11 @@ namespace nnue {
     static const int16_t* g_W1 = nullptr;
     static const int16_t* g_b1 = nullptr;
     static const int16_t* g_W2 = nullptr;
+    static const int16_t* g_b2 = nullptr;
     static std::vector<int16_t> g_W1_storage;
     static std::vector<int16_t> g_b1_storage;
     static std::vector<int16_t> g_W2_storage;
-    static float g_b2 = 0.0f;
-    static int g_b2_scaled = 0;
+    static std::vector<int16_t> g_b2_storage;
 
     static void clear_network() {
         g_ready = false;
@@ -65,11 +65,11 @@ namespace nnue {
         g_W1 = nullptr;
         g_b1 = nullptr;
         g_W2 = nullptr;
+        g_b2 = nullptr;
         g_W1_storage.clear();
         g_b1_storage.clear();
         g_W2_storage.clear();
-        g_b2 = 0.0f;
-        g_b2_scaled = 0;
+        g_b2_storage.clear();
     }
 
     static inline bool read_all(FILE* f, void* dst, size_t bytes) {
@@ -120,7 +120,8 @@ namespace nnue {
     template <typename Reader>
     static inline uint32_t read_u32(Reader& reader, bool& ok) {
         uint32_t x = 0;
-        ok = reader.read(&x, sizeof(x));
+        if (ok)
+            ok = reader.read(&x, sizeof(x));
         return x;
     }
 
@@ -131,23 +132,31 @@ namespace nnue {
         const uint32_t version = read_u32(reader, ok);
         const uint32_t inputs = read_u32(reader, ok);
         const uint32_t hidden = read_u32(reader, ok);
+        const uint32_t outputBuckets = read_u32(reader, ok);
         const uint32_t qa = read_u32(reader, ok);
         const uint32_t qb = read_u32(reader, ok);
 
-        if (!ok || magic != MAGIC || version != VERSION_V5_BASIC ||
-            inputs != INPUTS || hidden != HIDDEN || qa != QA || qb != QB) {
+        if (!ok || magic != MAGIC || inputs != INPUTS || hidden != HIDDEN ||
+            version != VERSION_V6_BUCKETED || outputBuckets != OUTPUT_BUCKETS ||
+            qa != QA || qb != QB) {
             clear_network();
             return false;
         }
 
         g_W1_storage.assign(INPUTS * HIDDEN, 0);
         g_b1_storage.assign(HIDDEN, 0);
-        g_W2_storage.assign(2 * HIDDEN, 0);
 
         if (!reader.read(g_W1_storage.data(), g_W1_storage.size() * sizeof(int16_t)) ||
-            !reader.read(g_b1_storage.data(), g_b1_storage.size() * sizeof(int16_t)) ||
-            !reader.read(g_W2_storage.data(), g_W2_storage.size() * sizeof(int16_t)) ||
-            !reader.read(&g_b2, sizeof(g_b2))) {
+            !reader.read(g_b1_storage.data(), g_b1_storage.size() * sizeof(int16_t))) {
+            clear_network();
+            return false;
+        }
+
+        g_W2_storage.assign(OUTPUT_BUCKETS * 2 * HIDDEN, 0);
+        g_b2_storage.assign(OUTPUT_BUCKETS, 0);
+
+        if (!reader.read(g_W2_storage.data(), g_W2_storage.size() * sizeof(int16_t)) ||
+            !reader.read(g_b2_storage.data(), g_b2_storage.size() * sizeof(int16_t))) {
             clear_network();
             return false;
         }
@@ -155,7 +164,7 @@ namespace nnue {
         g_W1 = g_W1_storage.data();
         g_b1 = g_b1_storage.data();
         g_W2 = g_W2_storage.data();
-        g_b2_scaled = static_cast<int>(std::round(g_b2 * NETWORK_SCALE));
+        g_b2 = g_b2_storage.data();
         g_load_source = source;
         g_ready = true;
         return true;
@@ -164,21 +173,22 @@ namespace nnue {
 #if SHADOW_HAS_EMBEDDED_NNUE
     static bool load_embedded_network() {
         if (embedded::MAGIC != MAGIC ||
-            embedded::VERSION != VERSION_V5_BASIC ||
+            embedded::VERSION != VERSION_V6_BUCKETED ||
             embedded::INPUTS != INPUTS ||
             embedded::HIDDEN != HIDDEN ||
+            embedded::OUTPUT_BUCKETS != OUTPUT_BUCKETS ||
             embedded::QA != QA ||
             embedded::QB != QB ||
             embedded::W1_SIZE != static_cast<size_t>(INPUTS * HIDDEN) ||
             embedded::B1_SIZE != static_cast<size_t>(HIDDEN) ||
-            embedded::W2_SIZE != static_cast<size_t>(2 * HIDDEN))
+            embedded::W2_SIZE != static_cast<size_t>(OUTPUT_BUCKETS * 2 * HIDDEN) ||
+            embedded::B2_SIZE != static_cast<size_t>(OUTPUT_BUCKETS))
             return false;
 
         g_W1 = embedded::W1;
         g_b1 = embedded::B1;
         g_W2 = embedded::W2;
-        g_b2 = std::bit_cast<float>(embedded::B2_BITS);
-        g_b2_scaled = static_cast<int>(std::round(g_b2 * NETWORK_SCALE));
+        g_b2 = embedded::B2;
         g_load_source = LoadSource::Embedded;
         g_ready = true;
         return true;
@@ -215,25 +225,37 @@ namespace nnue {
         return &g_W1[size_t(feat_idx) * HIDDEN];
     }
 
-    static int evaluate_from_accs(const int16_t acc_stm[HIDDEN],
-        const int16_t acc_ntm[HIDDEN]) {
-        int64_t sum = shadow_simd::dot_screlu_i16(acc_stm, g_W2, HIDDEN);
-        sum += shadow_simd::dot_screlu_i16(acc_ntm, g_W2 + HIDDEN, HIDDEN);
-
-        const int64_t scale_num = static_cast<int64_t>(NETWORK_SCALE);
-        const int64_t scale_den = static_cast<int64_t>(QA) * QA * QB;
-
-        const int out = g_b2_scaled + static_cast<int>((sum * scale_num) / scale_den);
-        return out;
+    static inline int output_bucket(const Position& pos) {
+        const int pieces = popcount(pos.all_pieces()) - 2;
+        return std::clamp(pieces / BUCKET_DIVISOR, 0, OUTPUT_BUCKETS - 1);
     }
 
-    int evaluate_from_pair(const AccumulatorPair& pair, Color stm) {
+    static int evaluate_from_accs(const int16_t acc_stm[HIDDEN],
+        const int16_t acc_ntm[HIDDEN],
+        int bucket) {
+        const int16_t* weights = g_W2 + size_t(bucket) * 2 * HIDDEN;
+
+        int64_t output = shadow_simd::dot_screlu_i16(acc_stm, weights, HIDDEN);
+        output += shadow_simd::dot_screlu_i16(acc_ntm, weights + HIDDEN, HIDDEN);
+
+        output /= QA;
+        output += g_b2[bucket];
+        output *= NETWORK_SCALE;
+        output /= static_cast<int64_t>(QA) * QB;
+
+        return static_cast<int>(output);
+    }
+
+    int evaluate_from_pair(const AccumulatorPair& pair, const Position& pos) {
         if (!g_ready)
             return 0;
 
+        const Color stm = pos.side_to_move();
+        const int bucket = output_bucket(pos);
+
         return stm == WHITE
-            ? evaluate_from_accs(pair.white, pair.black)
-            : evaluate_from_accs(pair.black, pair.white);
+            ? evaluate_from_accs(pair.white, pair.black, bucket)
+            : evaluate_from_accs(pair.black, pair.white, bucket);
     }
 
     bool init(const std::string& filepath) {
@@ -341,7 +363,7 @@ namespace nnue {
         AccumulatorPair pair{};
         refresh_acc(pos, WHITE, pair.white);
         refresh_acc(pos, BLACK, pair.black);
-        return evaluate_from_pair(pair, pos.side_to_move());
+        return evaluate_from_pair(pair, pos);
     }
 
 } // namespace nnue

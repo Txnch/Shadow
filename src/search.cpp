@@ -436,7 +436,7 @@ static inline int eval_from_stack(const Position& pos, SearchStack* ss, int ply)
 
     if (nnue::is_ready()) {
         ensure_accumulator(pos, ss, ply);
-        score = nnue::evaluate_from_pair(ss[ply].acc, pos.side_to_move());
+        score = nnue::evaluate_from_pair(ss[ply].acc, pos);
     }
     else
         score = evaluate(pos);
