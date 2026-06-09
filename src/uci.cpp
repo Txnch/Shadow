@@ -5,6 +5,7 @@
 #include "move.h"
 #include "tt.h"
 #include "evaluate.h"
+#include "wdl.h"
 
 #include <iostream>
 #include <sstream>
@@ -12,6 +13,7 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 
 static const char* STARTPOS_FEN =
@@ -88,6 +90,7 @@ void uci_loop()
             std::cout << "option name Move Overhead type spin default "
                 << DEFAULT_MOVE_OVERHEAD_MS << " min " << MIN_MOVE_OVERHEAD_MS
                 << " max " << MAX_MOVE_OVERHEAD_MS << "\n";
+            std::cout << "option name UCI_ShowWDL type check default false\n";
             std::cout << "uciok\n" << std::flush;
         }
 
@@ -100,9 +103,17 @@ void uci_loop()
         else if (line == "eval")
         {
             int raw_eval = evaluate(pos);
+            int normalized_eval = wdl::normalize_score(raw_eval, pos);
 
             std::cout << "--------------------------------\n";
-            std::cout << "info string Pure NNUE Eval: " << raw_eval << " cp\n";
+            std::cout << "info string Pure NNUE Eval: " << normalized_eval
+                << " cp (raw " << raw_eval << ")\n";
+            if (g_uci_show_wdl.load(std::memory_order_relaxed))
+            {
+                const wdl::WDL model = wdl::model(raw_eval, pos);
+                std::cout << "info string WDL: " << model.win << " "
+                    << model.draw << " " << model.loss << "\n";
+            }
             std::cout << "info string Side to move: " << (pos.side_to_move() == WHITE ? "White" : "Black") << "\n";
             std::cout << "--------------------------------\n";
             std::cout << std::flush;
@@ -165,6 +176,17 @@ void uci_loop()
 
                 move_overhead_ms = std::clamp(overhead, MIN_MOVE_OVERHEAD_MS, MAX_MOVE_OVERHEAD_MS);
                 std::cout << "info string Move Overhead set to " << move_overhead_ms << " ms\n";
+            }
+            else if (name == "UCI_ShowWDL")
+            {
+                std::string lower_value = value;
+                std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+                const bool show_wdl = lower_value == "true" || lower_value == "1";
+                g_uci_show_wdl.store(show_wdl, std::memory_order_relaxed);
+                std::cout << "info string UCI_ShowWDL set to "
+                    << (show_wdl ? "true" : "false") << "\n";
             }
         }
 

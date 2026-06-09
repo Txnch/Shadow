@@ -1,11 +1,13 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include "move.h"
 #include "position.h"
 
 
 extern bool g_silent_search;
+extern std::atomic<bool> g_uci_show_wdl;
 
 struct SearchResult
 {

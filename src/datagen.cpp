@@ -3,6 +3,7 @@
 #include "position.h"
 #include "search.h"
 #include "tt.h"
+#include "wdl.h"
 
 #include <algorithm>
 #include <bit>
@@ -18,13 +19,13 @@
 
 inline constexpr int MATE_THRESHOLD = 28000;
 inline constexpr int SCORE_CLAMP = 3000;
-inline constexpr int WIN_ADJ_SCORE = 2000;
+inline constexpr int WIN_ADJ_SCORE = 1000;
 inline constexpr int WIN_ADJ_PLIES = 6;
 inline constexpr int DRAW_ADJ_SCORE = 15;
 inline constexpr int DRAW_ADJ_MIN_PLY = 64;
 inline constexpr int DRAW_ADJ_PLIES = 7;
 inline constexpr int OPENING_FILTER_NODES = 1000;
-inline constexpr int OPENING_FILTER_MAX_ABS_SCORE = 1000;
+inline constexpr int OPENING_FILTER_MAX_ABS_SCORE = 500;
 
 inline bool is_mate_score(int s) {
     return std::abs(s) >= MATE_THRESHOLD;
@@ -253,7 +254,7 @@ namespace Shadow {
 
                 return res.best_move != 0
                     && !is_mate_score(res.score)
-                    && std::abs(res.score) <= OPENING_FILTER_MAX_ABS_SCORE;
+                    && std::abs(wdl::normalize_score(res.score, pos)) <= OPENING_FILTER_MAX_ABS_SCORE;
             }
 
         } // namespace
@@ -336,7 +337,7 @@ namespace Shadow {
             std::cerr << "Starting ViriFormat Datagen: " << target_games
                 << " games at " << nodes_per_move << " nodes/move\n";
             std::cerr << "Opening filter: " << OPENING_FILTER_NODES
-                << " nodes, max |score| " << OPENING_FILTER_MAX_ABS_SCORE << "\n";
+                << " nodes, max normalized |score| " << OPENING_FILTER_MAX_ABS_SCORE << "\n";
 
             const auto total_start_time = std::chrono::steady_clock::now();
             auto batch_start_time = std::chrono::steady_clock::now();
@@ -436,6 +437,7 @@ namespace Shadow {
 
                     const Color stm = pos.side_to_move();
                     const int white_relative_score = (stm == WHITE) ? res.score : -res.score;
+                    const int normalized_score = wdl::normalize_score(white_relative_score, pos);
                     const Piece moved_piece = pos.piece_on(from_sq(res.best_move));
                     const bool resets_draw_counter = is_capture(res.best_move) || piece_type(moved_piece) == PAWN;
 
@@ -460,11 +462,11 @@ namespace Shadow {
                         std::clamp(white_relative_score, -SCORE_CLAMP, SCORE_CLAMP));
                     game_moves.push_back(move_score);
 
-                    if (white_relative_score > WIN_ADJ_SCORE) {
+                    if (normalized_score > WIN_ADJ_SCORE) {
                         win_plies++;
                         loss_plies = draw_plies = 0;
                     }
-                    else if (white_relative_score < -WIN_ADJ_SCORE) {
+                    else if (normalized_score < -WIN_ADJ_SCORE) {
                         loss_plies++;
                         win_plies = draw_plies = 0;
                     }
@@ -473,7 +475,7 @@ namespace Shadow {
 
                         if (resets_draw_counter)
                             draw_plies = 0;
-                        else if (ply >= DRAW_ADJ_MIN_PLY && std::abs(white_relative_score) < DRAW_ADJ_SCORE)
+                        else if (ply >= DRAW_ADJ_MIN_PLY && std::abs(normalized_score) < DRAW_ADJ_SCORE)
                             draw_plies++;
                         else
                             draw_plies = 0;

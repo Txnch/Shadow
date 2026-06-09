@@ -5,6 +5,7 @@
 #include "move.h"
 #include "timeman.h"
 #include "tt.h"
+#include "wdl.h"
 
 #include <iostream>
 #include <atomic>
@@ -13,6 +14,7 @@
 #include <memory>
 
 bool g_silent_search = false;
+std::atomic<bool> g_uci_show_wdl(false);
 
 inline constexpr int INF = 30000;
 inline constexpr int MATE_SCORE = 29000;
@@ -1469,15 +1471,27 @@ static void print_search_info(Position& pos, int depth, int best_score)
     {
         int moves_to_mate = (MATE_SCORE - best_score + 1) / 2;
         std::cout << " score mate " << moves_to_mate;
+
+        if (g_uci_show_wdl.load(std::memory_order_relaxed))
+            std::cout << " wdl 1000 0 0";
     }
     else if (best_score < -MATE_SCORE + 1000)
     {
         int moves_to_mate = -(MATE_SCORE + best_score) / 2;
         std::cout << " score mate " << moves_to_mate;
+
+        if (g_uci_show_wdl.load(std::memory_order_relaxed))
+            std::cout << " wdl 0 0 1000";
     }
     else
     {
-        std::cout << " score cp " << best_score;
+        std::cout << " score cp " << wdl::normalize_score(best_score, pos);
+
+        if (g_uci_show_wdl.load(std::memory_order_relaxed))
+        {
+            const wdl::WDL model = wdl::model(best_score, pos);
+            std::cout << " wdl " << model.win << " " << model.draw << " " << model.loss;
+        }
     }
 
     std::cout << " nodes " << nodes_count
