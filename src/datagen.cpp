@@ -11,8 +11,10 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 #include <atomic>
 #include <csignal>
@@ -26,6 +28,9 @@ inline constexpr int DRAW_ADJ_MIN_PLY = 64;
 inline constexpr int DRAW_ADJ_PLIES = 7;
 inline constexpr int OPENING_FILTER_NODES = 1000;
 inline constexpr int OPENING_FILTER_MAX_ABS_SCORE = 500;
+inline constexpr int DATAGEN_BATCH_SIZE = 4;
+inline constexpr int DATAGEN_HASH_MB = 16;
+inline constexpr int DATAGEN_REPORT_INTERVAL = 10;
 
 inline bool is_mate_score(int s) {
     return std::abs(s) >= MATE_THRESHOLD;
@@ -257,13 +262,311 @@ namespace Shadow {
                     && std::abs(wdl::normalize_score(res.score, pos)) <= OPENING_FILTER_MAX_ABS_SCORE;
             }
 
+            struct GeneratedGame {
+                ViriPackedBoard start_board{};
+                std::vector<ViriMoveScore> moves;
+                uint8_t result = 1;
+            };
+
+            enum class GameAttempt {
+                Generated,
+                Retry,
+                Stopped
+            };
+
+            struct DatagenShared {
+                std::ofstream* out = nullptr;
+                std::mutex output_mutex;
+                std::mutex log_mutex;
+                std::atomic<int> reserved_games{ 0 };
+                std::atomic<int> completed_games{ 0 };
+                std::atomic<uint64_t> positions_saved{ 0 };
+                std::atomic<uint64_t> opening_filter_rejected{ 0 };
+                std::atomic<bool> write_failed{ false };
+                std::chrono::steady_clock::time_point start_time{};
+                int target_games = 0;
+            };
+
+            static GameAttempt try_generate_game(const std::vector<std::string>& opening_fens,
+                bool use_epd,
+                int random_opening_plies,
+                int nodes_per_move,
+                std::mt19937& rng,
+                GeneratedGame& game,
+                bool& opening_rejected)
+            {
+                opening_rejected = false;
+                game.result = 1;
+                game.moves.clear();
+                game.moves.reserve(128);
+
+                Position pos;
+                bool valid = true;
+                int open_plies = 0;
+
+                if (use_epd) {
+                    std::uniform_int_distribution<size_t> epd_dist(0, opening_fens.size() - 1);
+                    pos.set_fen(opening_fens[epd_dist(rng)]);
+                    if (random_opening_plies >= 0)
+                        open_plies = random_opening_plies;
+                }
+                else {
+                    pos.set_fen(STARTPOS_FEN);
+                    open_plies = random_opening_plies;
+                    if (open_plies < 0) {
+                        std::uniform_int_distribution<int> open_dist(8, 9);
+                        open_plies = open_dist(rng);
+                    }
+                }
+
+                for (int i = 0; i < open_plies; ++i) {
+                    MoveList moves = get_legal_moves(pos);
+                    if (moves.size == 0) {
+                        valid = false;
+                        break;
+                    }
+
+                    std::uniform_int_distribution<int> move_dist(0, moves.size - 1);
+                    if (!pos.make_move(moves.moves[move_dist(rng)])) {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (!valid)
+                    return GameAttempt::Retry;
+
+                if (!passes_opening_filter(pos)) {
+                    if (g_stop_datagen.load(std::memory_order_relaxed))
+                        return GameAttempt::Stopped;
+
+                    opening_rejected = true;
+                    return GameAttempt::Retry;
+                }
+
+                uint8_t result = 1;
+
+                clear_search_state_for_new_game();
+                tt_clear();
+
+                game.start_board = pack_board(pos, 0, result);
+                bool completed_game = false;
+
+                int win_plies = 0;
+                int loss_plies = 0;
+                int draw_plies = 0;
+
+                for (int ply = 0; ply < 400; ++ply) {
+                    if (g_stop_datagen.load(std::memory_order_relaxed)) {
+                        game.moves.clear();
+                        return GameAttempt::Stopped;
+                    }
+
+                    SearchResult res = search(pos, 64, -1, 0, 0, 0, true, nodes_per_move, 10, true);
+
+                    if (g_stop_datagen.load(std::memory_order_relaxed)) {
+                        game.moves.clear();
+                        return GameAttempt::Stopped;
+                    }
+
+                    if (res.best_move == 0) {
+                        MoveList moves = get_legal_moves(pos);
+                        if (moves.size == 0) {
+                            if (in_check(pos, pos.side_to_move()))
+                                result = (pos.side_to_move() == WHITE) ? 0 : 2;
+                            else
+                                result = 1;
+                            completed_game = true;
+                        }
+                        else {
+                            game.moves.clear();
+                        }
+                        break;
+                    }
+
+                    if (pos.halfmove_clock() >= 100 || pos.is_repetition_draw(0) || has_insufficient_material(pos)) {
+                        result = 1;
+                        completed_game = true;
+                        break;
+                    }
+
+                    const Color stm = pos.side_to_move();
+                    const int white_relative_score = (stm == WHITE) ? res.score : -res.score;
+                    const int normalized_score = wdl::normalize_score(white_relative_score, pos);
+                    const Piece moved_piece = pos.piece_on(from_sq(res.best_move));
+                    const bool resets_draw_counter = is_capture(res.best_move) || piece_type(moved_piece) == PAWN;
+
+                    ViriMoveScore move_score{};
+                    move_score.move = encode_viri_move(res.best_move, stm);
+
+                    if (is_mate_score(res.score)) {
+                        result = (res.score > 0)
+                            ? ((stm == WHITE) ? 2 : 0)
+                            : ((stm == WHITE) ? 0 : 2);
+
+                        int mate_cp = (res.score > 0) ? SCORE_CLAMP : -SCORE_CLAMP;
+                        if (stm == BLACK) mate_cp = -mate_cp;
+                        move_score.score = clamp_score_to_i16(mate_cp);
+
+                        game.moves.push_back(move_score);
+                        completed_game = true;
+                        break;
+                    }
+
+                    move_score.score = clamp_score_to_i16(
+                        std::clamp(white_relative_score, -SCORE_CLAMP, SCORE_CLAMP));
+                    game.moves.push_back(move_score);
+
+                    if (normalized_score > WIN_ADJ_SCORE) {
+                        win_plies++;
+                        loss_plies = draw_plies = 0;
+                    }
+                    else if (normalized_score < -WIN_ADJ_SCORE) {
+                        loss_plies++;
+                        win_plies = draw_plies = 0;
+                    }
+                    else {
+                        win_plies = loss_plies = 0;
+
+                        if (resets_draw_counter)
+                            draw_plies = 0;
+                        else if (ply >= DRAW_ADJ_MIN_PLY && std::abs(normalized_score) < DRAW_ADJ_SCORE)
+                            draw_plies++;
+                        else
+                            draw_plies = 0;
+                    }
+
+                    if (win_plies >= WIN_ADJ_PLIES) {
+                        result = 2;
+                        completed_game = true;
+                        break;
+                    }
+                    if (loss_plies >= WIN_ADJ_PLIES) {
+                        result = 0;
+                        completed_game = true;
+                        break;
+                    }
+                    if (draw_plies >= DRAW_ADJ_PLIES) {
+                        result = 1;
+                        completed_game = true;
+                        break;
+                    }
+
+                    if (!pos.make_move(res.best_move)) {
+                        game.moves.clear();
+                        break;
+                    }
+                }
+
+                if (!completed_game || game.moves.empty())
+                    return GameAttempt::Retry;
+
+                game.result = result;
+                return GameAttempt::Generated;
+            }
+
+            static int reserve_batch(DatagenShared& shared)
+            {
+                int current = shared.reserved_games.load(std::memory_order_relaxed);
+                while (current < shared.target_games) {
+                    const int batch_size = std::min(DATAGEN_BATCH_SIZE, shared.target_games - current);
+                    const int target = current + batch_size;
+                    if (shared.reserved_games.compare_exchange_weak(
+                        current, target, std::memory_order_relaxed, std::memory_order_relaxed))
+                        return batch_size;
+                }
+
+                return 0;
+            }
+
+            static void report_progress(DatagenShared& shared, int completed)
+            {
+                if (completed % DATAGEN_REPORT_INTERVAL != 0 && completed != shared.target_games)
+                    return;
+
+                const auto now = std::chrono::steady_clock::now();
+                const std::chrono::duration<double> elapsed = now - shared.start_time;
+                const double games_per_second = elapsed.count() > 0.0
+                    ? double(completed) / elapsed.count()
+                    : 0.0;
+
+                std::lock_guard<std::mutex> lock(shared.log_mutex);
+                std::cerr << "Played: " << completed
+                    << " games | Positions: " << shared.positions_saved.load(std::memory_order_relaxed)
+                    << " | Filter rejects: " << shared.opening_filter_rejected.load(std::memory_order_relaxed)
+                    << " | Speed: " << games_per_second << " games/s\n";
+            }
+
+            static void generation_worker(int worker_id,
+                DatagenShared& shared,
+                const std::vector<std::string>& opening_fens,
+                bool use_epd,
+                int random_opening_plies,
+                int nodes_per_move,
+                uint32_t seed)
+            {
+                (void)worker_id;
+
+                tt_resize_mb(DATAGEN_HASH_MB);
+
+                std::mt19937 rng(seed);
+                GeneratedGame game;
+
+                while (!g_stop_datagen.load(std::memory_order_relaxed)
+                    && !shared.write_failed.load(std::memory_order_relaxed)) {
+                    const int batch_size = reserve_batch(shared);
+                    if (batch_size == 0)
+                        break;
+
+                    int generated = 0;
+                    while (generated < batch_size
+                        && !g_stop_datagen.load(std::memory_order_relaxed)
+                        && !shared.write_failed.load(std::memory_order_relaxed)) {
+                        bool opening_rejected = false;
+                        const GameAttempt attempt = try_generate_game(
+                            opening_fens,
+                            use_epd,
+                            random_opening_plies,
+                            nodes_per_move,
+                            rng,
+                            game,
+                            opening_rejected);
+
+                        if (attempt == GameAttempt::Stopped)
+                            break;
+
+                        if (opening_rejected)
+                            shared.opening_filter_rejected.fetch_add(1, std::memory_order_relaxed);
+
+                        if (attempt != GameAttempt::Generated)
+                            continue;
+
+                        {
+                            std::lock_guard<std::mutex> lock(shared.output_mutex);
+                            if (!write_game(*shared.out, game.start_board, game.moves, game.result)) {
+                                shared.write_failed.store(true, std::memory_order_relaxed);
+                                request_datagen_stop();
+                                break;
+                            }
+                        }
+
+                        ++generated;
+                        const uint64_t game_positions = static_cast<uint64_t>(game.moves.size());
+                        shared.positions_saved.fetch_add(game_positions, std::memory_order_relaxed);
+                        const int completed = shared.completed_games.fetch_add(1, std::memory_order_relaxed) + 1;
+                        report_progress(shared, completed);
+                    }
+                }
+            }
+
         } // namespace
 
         void run(const std::string& output_path,
             const std::string& epd_path,
             int nodes_per_move,
             int target_games,
-            int random_opening_plies)
+            int random_opening_plies,
+            int thread_count)
         {
             if (target_games <= 0) {
                 std::cerr << "Datagen: target games must be greater than zero\n";
@@ -280,8 +583,12 @@ namespace Shadow {
                 return;
             }
 
+            if (thread_count <= 0) {
+                std::cerr << "Datagen: thread count must be greater than zero\n";
+                return;
+            }
+
             g_silent_search = true;
-            std::mt19937 rng(std::random_device{}());
 
             install_stop_handlers();
             g_stop_datagen.store(false);
@@ -328,211 +635,57 @@ namespace Shadow {
                 return;
             }
 
-            tt_resize_mb(16);
+            tt_resize_mb(DATAGEN_HASH_MB);
 
-            uint64_t games_played = 0;
-            uint64_t positions_saved = 0;
-            uint64_t opening_filter_rejected = 0;
-
+            const int worker_count = std::min(thread_count, target_games);
             std::cerr << "Starting ViriFormat Datagen: " << target_games
-                << " games at " << nodes_per_move << " nodes/move\n";
+                << " games at " << nodes_per_move << " nodes/move"
+                << " using " << worker_count << " thread" << (worker_count == 1 ? "" : "s") << "\n";
             std::cerr << "Opening filter: " << OPENING_FILTER_NODES
                 << " nodes, max normalized |score| " << OPENING_FILTER_MAX_ABS_SCORE << "\n";
 
-            const auto total_start_time = std::chrono::steady_clock::now();
-            auto batch_start_time = std::chrono::steady_clock::now();
+            DatagenShared shared;
+            shared.out = &out;
+            shared.target_games = target_games;
+            shared.start_time = std::chrono::steady_clock::now();
 
-            std::uniform_int_distribution<size_t> epd_dist(0, opening_fens.empty() ? 0 : opening_fens.size() - 1);
+            const auto seed_time = std::chrono::steady_clock::now().time_since_epoch().count();
+            std::mt19937_64 seed_rng(static_cast<uint64_t>(seed_time) ^ std::random_device{}());
+            std::vector<std::thread> workers;
+            workers.reserve(worker_count);
 
-            while (games_played < target_games && !g_stop_datagen.load(std::memory_order_relaxed)) {
-                Position pos;
-                bool valid = true;
-                int open_plies = 0;
-
-                if (use_epd) {
-                    pos.set_fen(opening_fens[epd_dist(rng)]);
-                    if (random_opening_plies >= 0)
-                        open_plies = random_opening_plies;
-                }
-                else {
-                    pos.set_fen(STARTPOS_FEN);
-                    open_plies = random_opening_plies;
-                    if (open_plies < 0) {
-                        std::uniform_int_distribution<int> open_dist(8, 9);
-                        open_plies = open_dist(rng);
-                    }
-                }
-
-                for (int i = 0; i < open_plies; ++i) {
-                    MoveList moves = get_legal_moves(pos);
-                    if (moves.size == 0) {
-                        valid = false;
-                        break;
-                    }
-
-                    std::uniform_int_distribution<int> move_dist(0, moves.size - 1);
-                    if (!pos.make_move(moves.moves[move_dist(rng)])) {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (!valid)
-                    continue;
-
-                if (!passes_opening_filter(pos)) {
-                    if (g_stop_datagen.load(std::memory_order_relaxed))
-                        break;
-                    ++opening_filter_rejected;
-                    continue;
-                }
-
-                uint8_t result = 1;
-
-                clear_search_state_for_new_game();
-                tt_clear();
-
-                ViriPackedBoard start_board = pack_board(pos, 0, result);
-                std::vector<ViriMoveScore> game_moves;
-                game_moves.reserve(128);
-                bool completed_game = false;
-
-                int win_plies = 0;
-                int loss_plies = 0;
-                int draw_plies = 0;
-
-                for (int ply = 0; ply < 400; ++ply) {
-                    if (g_stop_datagen.load(std::memory_order_relaxed)) {
-                        game_moves.clear();
-                        break;
-                    }
-
-                    SearchResult res = search(pos, 64, -1, 0, 0, 0, true, nodes_per_move, 10, true);
-
-                    if (g_stop_datagen.load(std::memory_order_relaxed)) {
-                        game_moves.clear();
-                        break;
-                    }
-
-                    if (res.best_move == 0) {
-                        MoveList moves = get_legal_moves(pos);
-                        if (moves.size == 0) {
-                            if (in_check(pos, pos.side_to_move()))
-                                result = (pos.side_to_move() == WHITE) ? 0 : 2;
-                            else
-                                result = 1;
-                            completed_game = true;
-                        }
-                        else {
-                            game_moves.clear();
-                        }
-                        break;
-                    }
-
-                    if (pos.halfmove_clock() >= 100 || pos.is_repetition_draw(0) || has_insufficient_material(pos)) {
-                        result = 1;
-                        completed_game = true;
-                        break;
-                    }
-
-                    const Color stm = pos.side_to_move();
-                    const int white_relative_score = (stm == WHITE) ? res.score : -res.score;
-                    const int normalized_score = wdl::normalize_score(white_relative_score, pos);
-                    const Piece moved_piece = pos.piece_on(from_sq(res.best_move));
-                    const bool resets_draw_counter = is_capture(res.best_move) || piece_type(moved_piece) == PAWN;
-
-                    ViriMoveScore move_score{};
-                    move_score.move = encode_viri_move(res.best_move, stm);
-
-                    if (is_mate_score(res.score)) {
-                        result = (res.score > 0)
-                            ? ((stm == WHITE) ? 2 : 0)
-                            : ((stm == WHITE) ? 0 : 2);
-
-                        int mate_cp = (res.score > 0) ? SCORE_CLAMP : -SCORE_CLAMP;
-                        if (stm == BLACK) mate_cp = -mate_cp;
-                        move_score.score = clamp_score_to_i16(mate_cp);
-
-                        game_moves.push_back(move_score);
-                        completed_game = true;
-                        break;
-                    }
-
-                    move_score.score = clamp_score_to_i16(
-                        std::clamp(white_relative_score, -SCORE_CLAMP, SCORE_CLAMP));
-                    game_moves.push_back(move_score);
-
-                    if (normalized_score > WIN_ADJ_SCORE) {
-                        win_plies++;
-                        loss_plies = draw_plies = 0;
-                    }
-                    else if (normalized_score < -WIN_ADJ_SCORE) {
-                        loss_plies++;
-                        win_plies = draw_plies = 0;
-                    }
-                    else {
-                        win_plies = loss_plies = 0;
-
-                        if (resets_draw_counter)
-                            draw_plies = 0;
-                        else if (ply >= DRAW_ADJ_MIN_PLY && std::abs(normalized_score) < DRAW_ADJ_SCORE)
-                            draw_plies++;
-                        else
-                            draw_plies = 0;
-                    }
-
-                    if (win_plies >= WIN_ADJ_PLIES) {
-                        result = 2;
-                        completed_game = true;
-                        break;
-                    }
-                    if (loss_plies >= WIN_ADJ_PLIES) {
-                        result = 0;
-                        completed_game = true;
-                        break;
-                    }
-                    if (draw_plies >= DRAW_ADJ_PLIES) {
-                        result = 1;
-                        completed_game = true;
-                        break;
-                    }
-
-                    if (!pos.make_move(res.best_move)) {
-                        game_moves.clear();
-                        break;
-                    }
-                }
-
-                if (completed_game && !g_stop_datagen.load(std::memory_order_relaxed) && !game_moves.empty()) {
-                    if (!write_game(out, start_board, game_moves, result)) {
-                        std::cerr << "Datagen: failed while writing to " << output_path << "\n";
-                        break;
-                    }
-
-                    positions_saved += static_cast<uint64_t>(game_moves.size());
-                    ++games_played;
-
-                    if (games_played % 10 == 0) {
-                        const auto batch_end_time = std::chrono::steady_clock::now();
-                        const std::chrono::duration<double> batch_elapsed = batch_end_time - batch_start_time;
-
-                        std::cerr << "Played: " << games_played
-                            << " games | Positions: " << positions_saved
-                            << " | Filter rejects: " << opening_filter_rejected
-                            << " | Time: " << batch_elapsed.count() << " s\n";
-
-                        batch_start_time = std::chrono::steady_clock::now();
-                    }
-                }
+            for (int i = 0; i < worker_count; ++i) {
+                const uint32_t seed = static_cast<uint32_t>(seed_rng());
+                workers.emplace_back([&, i, seed]() {
+                    generation_worker(i,
+                        shared,
+                        opening_fens,
+                        use_epd,
+                        random_opening_plies,
+                        nodes_per_move,
+                        seed);
+                    });
             }
 
+            for (std::thread& worker : workers)
+                worker.join();
+
             const auto total_end_time = std::chrono::steady_clock::now();
-            const std::chrono::duration<double> total_elapsed = total_end_time - total_start_time;
+            const std::chrono::duration<double> total_elapsed = total_end_time - shared.start_time;
 
             out.close();
-            std::cerr << "Datagen complete! Saved " << positions_saved
+
+            if (shared.write_failed.load(std::memory_order_relaxed))
+                std::cerr << "Datagen: failed while writing to " << output_path << "\n";
+
+            std::cerr << "Datagen complete! Saved "
+                << shared.positions_saved.load(std::memory_order_relaxed)
                 << " ViriFormat positions to " << output_path << "\n";
-            std::cerr << "Opening filter rejected: " << opening_filter_rejected << " candidate games.\n";
+            std::cerr << "Games generated: "
+                << shared.completed_games.load(std::memory_order_relaxed) << "\n";
+            std::cerr << "Opening filter rejected: "
+                << shared.opening_filter_rejected.load(std::memory_order_relaxed)
+                << " candidate games.\n";
             std::cerr << "Total time elapsed: " << total_elapsed.count() << " seconds.\n";
         }
 

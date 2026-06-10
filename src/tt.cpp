@@ -1,6 +1,7 @@
 #include "tt.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -20,10 +21,11 @@ namespace {
         TTEntry e[TT_WAYS];
     };
 
-    static std::vector<TTBucket> table;
-    static uint64_t g_mask = 0;
-    static uint8_t g_gen = 1;
-    static int g_hash_mb = 0;
+    static std::atomic<int> g_configured_hash_mb{ DEFAULT_HASH_MB };
+    static thread_local std::vector<TTBucket> table;
+    static thread_local uint64_t g_mask = 0;
+    static thread_local uint8_t g_gen = 1;
+    static thread_local int g_hash_mb = 0;
 
 
     static inline int bound_bonus(TTFlag flag) {
@@ -60,6 +62,10 @@ namespace {
         return floor_pow2(buckets);
     }
 
+    static int clamp_hash_mb(int mb) {
+        return std::max(1, std::min(mb, MAX_HASH_MB));
+    }
+
     static void clear_table_contents() {
         for (TTBucket& b : table) {
             for (int w = 0; w < TT_WAYS; ++w) {
@@ -74,11 +80,33 @@ namespace {
         }
     }
 
+    static bool resize_local_table(int mb) {
+        const int clampedMb = clamp_hash_mb(mb);
+        const size_t buckets = buckets_for_mb(clampedMb);
+
+        try {
+            std::vector<TTBucket> newTable;
+            newTable.resize(buckets);
+
+            table.swap(newTable);
+            g_mask = uint64_t(buckets - 1);
+            g_hash_mb = clampedMb;
+            g_gen = 1;
+
+            clear_table_contents();
+            return true;
+        }
+        catch (...) {
+            return false;
+        }
+    }
+
     static void ensure_table() {
-        if (!table.empty())
+        const int configuredMb = clamp_hash_mb(g_configured_hash_mb.load(std::memory_order_relaxed));
+        if (!table.empty() && g_hash_mb == configuredMb)
             return;
 
-        if (!tt_resize_mb(DEFAULT_HASH_MB)) {
+        if (!resize_local_table(configuredMb)) {
             table.resize(1);
             g_mask = 0;
             g_hash_mb = 1;
@@ -113,29 +141,16 @@ namespace {
 } // namespace
 
 bool tt_resize_mb(int mb) {
-    const int clampedMb = std::max(1, std::min(mb, MAX_HASH_MB));
-    const size_t buckets = buckets_for_mb(clampedMb);
-
-    try {
-        std::vector<TTBucket> newTable;
-        newTable.resize(buckets);
-
-        table.swap(newTable);
-        g_mask = uint64_t(buckets - 1);
-        g_hash_mb = clampedMb;
-        g_gen = 1;
-
-        clear_table_contents();
-        return true;
-    }
-    catch (...) {
+    const int clampedMb = clamp_hash_mb(mb);
+    if (!resize_local_table(clampedMb))
         return false;
-    }
+
+    g_configured_hash_mb.store(clampedMb, std::memory_order_relaxed);
+    return true;
 }
 
 int tt_hash_mb() {
-    ensure_table();
-    return g_hash_mb;
+    return clamp_hash_mb(g_configured_hash_mb.load(std::memory_order_relaxed));
 }
 
 void tt_new_search() {

@@ -7,6 +7,7 @@ namespace Shadow {
             const std::string& epd_path,
             int nodes_per_move,
             int target_games,
-            int random_opening_plies = -1);
+            int random_opening_plies = -1,
+            int thread_count = 1);
     }
 }

@@ -15,17 +15,39 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <condition_variable>
+#include <mutex>
 
 static const char* STARTPOS_FEN =
 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-
-static std::thread search_thread;
-static std::atomic<bool> searching(false);
 
 static constexpr int DEFAULT_MOVE_OVERHEAD_MS = 10;
 static constexpr int MIN_MOVE_OVERHEAD_MS = 0;
 static constexpr int MAX_MOVE_OVERHEAD_MS = 5000;
 static int move_overhead_ms = DEFAULT_MOVE_OVERHEAD_MS;
+
+struct SearchJob {
+    Position pos;
+    int depth = 64;
+    int movetime = -1;
+    int time_left = 0;
+    int increment = 0;
+    int moves_to_go = 0;
+    bool infinite = false;
+    uint64_t nodes = 0;
+    int move_overhead = DEFAULT_MOVE_OVERHEAD_MS;
+};
+
+static std::thread search_thread;
+static std::mutex search_mutex;
+static std::condition_variable search_cv;
+static std::atomic<bool> searching(false);
+static bool search_worker_started = false;
+static bool search_worker_quit = false;
+static bool search_worker_has_job = false;
+static SearchJob pending_search_job;
+static uint64_t search_clear_request = 0;
+static uint64_t search_clear_done = 0;
 
 
 
@@ -67,6 +89,162 @@ static Move parse_move(Position& pos, const std::string& s)
     }
 
     return 0;
+}
+
+static void print_bestmove(Move best_move)
+{
+    if (best_move == 0)
+    {
+        std::cout << "bestmove 0000\n" << std::flush;
+        return;
+    }
+
+    Square f = from_sq(best_move);
+    Square t = to_sq(best_move);
+
+    std::cout << "bestmove "
+        << char('a' + file_of(f))
+        << char('1' + rank_of(f))
+        << char('a' + file_of(t))
+        << char('1' + rank_of(t));
+
+    if (is_promotion(best_move))
+    {
+        PieceType pt = promotion_type(best_move);
+        if (pt == QUEEN)  std::cout << "q";
+        if (pt == ROOK)   std::cout << "r";
+        if (pt == BISHOP) std::cout << "b";
+        if (pt == KNIGHT) std::cout << "n";
+    }
+
+    std::cout << "\n" << std::flush;
+}
+
+static void search_worker_loop()
+{
+    std::unique_lock<std::mutex> lock(search_mutex);
+
+    while (true)
+    {
+        search_cv.wait(lock, [] {
+            return search_worker_quit
+                || search_worker_has_job
+                || search_clear_done != search_clear_request;
+            });
+
+        if (search_worker_quit)
+            break;
+
+        if (search_clear_done != search_clear_request)
+        {
+            const uint64_t request = search_clear_request;
+            lock.unlock();
+            clear_search_state_for_new_game();
+            tt_clear();
+            lock.lock();
+            search_clear_done = request;
+            search_cv.notify_all();
+            continue;
+        }
+
+        SearchJob job = pending_search_job;
+        search_worker_has_job = false;
+        lock.unlock();
+
+        SearchResult result = search(job.pos,
+            job.depth,
+            job.movetime,
+            job.time_left,
+            job.increment,
+            job.moves_to_go,
+            job.infinite,
+            job.nodes,
+            job.move_overhead);
+
+        print_bestmove(result.best_move);
+
+        lock.lock();
+        searching = false;
+        search_cv.notify_all();
+    }
+}
+
+static void ensure_search_worker_started()
+{
+    if (search_worker_started)
+        return;
+
+    search_worker_quit = false;
+    search_thread = std::thread(search_worker_loop);
+    search_worker_started = true;
+}
+
+static void wait_for_search_finished()
+{
+    if (!search_worker_started)
+        return;
+
+    std::unique_lock<std::mutex> lock(search_mutex);
+    search_cv.wait(lock, [] {
+        return !searching.load(std::memory_order_relaxed) && !search_worker_has_job;
+        });
+}
+
+static void stop_search_and_wait()
+{
+    if (!search_worker_started)
+        return;
+
+    stop_search_now();
+    wait_for_search_finished();
+}
+
+static void clear_worker_search_state()
+{
+    ensure_search_worker_started();
+    stop_search_and_wait();
+
+    std::unique_lock<std::mutex> lock(search_mutex);
+    ++search_clear_request;
+    search_cv.notify_one();
+    search_cv.wait(lock, [] {
+        return search_clear_done == search_clear_request;
+        });
+}
+
+static void start_search_job(const SearchJob& job)
+{
+    ensure_search_worker_started();
+
+    std::lock_guard<std::mutex> lock(search_mutex);
+    if (searching.load(std::memory_order_relaxed))
+        return;
+
+    pending_search_job = job;
+    search_worker_has_job = true;
+    searching = true;
+    search_cv.notify_one();
+}
+
+static void shutdown_search_worker()
+{
+    if (!search_worker_started)
+        return;
+
+    stop_search_and_wait();
+
+    {
+        std::lock_guard<std::mutex> lock(search_mutex);
+        search_worker_quit = true;
+        search_cv.notify_one();
+    }
+
+    if (search_thread.joinable())
+        search_thread.join();
+
+    search_worker_started = false;
+    search_worker_quit = false;
+    searching = false;
 }
 
 
@@ -153,12 +331,7 @@ void uci_loop()
                 }
 
                 if (searching)
-                {
-                    stop_search_now();
-                    if (search_thread.joinable())
-                        search_thread.join();
-                    searching = false;
-                }
+                    stop_search_and_wait();
 
                 if (tt_resize_mb(mb))
                     std::cout << "info string Hash set to " << tt_hash_mb() << " MB\n";
@@ -193,28 +366,15 @@ void uci_loop()
 
         else if (line == "ucinewgame")
         {
+            clear_worker_search_state();
             tt_clear();
-            stop_search_now();
-
-
-            if (search_thread.joinable())
-                search_thread.join();
-
-            searching = false;
-
-            clear_search_state_for_new_game();
             pos.set_fen(STARTPOS_FEN);
         }
 
 
         else if (line.rfind("position", 0) == 0)
         {
-            stop_search_now();
-
-            if (search_thread.joinable())
-                search_thread.join();
-
-            searching = false;
+            stop_search_and_wait();
 
             std::istringstream ss(line);
             std::string token;
@@ -290,7 +450,7 @@ void uci_loop()
         else if (line.rfind("go", 0) == 0)
         {
             if (searching)
-                continue;
+                wait_for_search_finished();
 
             int depth = 64;
             int movetime = -1;
@@ -341,71 +501,34 @@ void uci_loop()
             if (infinite || (movetime <= 0 && wtime <= 0 && btime <= 0 && depth <= 0 && nodes == 0))
                 infinite = true;
 
-            stop_search_now();
-            if (search_thread.joinable())
-                search_thread.join();
-
-            searching = true;
-            Position search_pos = pos;
-            int move_overhead = move_overhead_ms;
-
-            search_thread = std::thread([search_pos, depth, movetime, timeLeft, inc, movestogo, infinite, nodes, move_overhead]() mutable
-                {
-                    SearchResult result = search(search_pos, depth, movetime, timeLeft, inc, movestogo, infinite, nodes, move_overhead);
-
-                    if (result.best_move == 0)
-                    {
-                        std::cout << "bestmove 0000\n" << std::flush;
-                    }
-                    else
-                    {
-                        Square f = from_sq(result.best_move);
-                        Square t = to_sq(result.best_move);
-
-                        std::cout << "bestmove "
-                            << char('a' + file_of(f))
-                            << char('1' + rank_of(f))
-                            << char('a' + file_of(t))
-                            << char('1' + rank_of(t));
-
-                        if (is_promotion(result.best_move))
-                        {
-                            PieceType pt = promotion_type(result.best_move);
-                            if (pt == QUEEN)  std::cout << "q";
-                            if (pt == ROOK)   std::cout << "r";
-                            if (pt == BISHOP) std::cout << "b";
-                            if (pt == KNIGHT) std::cout << "n";
-                        }
-
-                        std::cout << "\n" << std::flush;
-                    }
-
-                    searching = false;
-                });
+            SearchJob job;
+            job.pos = pos;
+            job.depth = depth;
+            job.movetime = movetime;
+            job.time_left = timeLeft;
+            job.increment = inc;
+            job.moves_to_go = movestogo;
+            job.infinite = infinite;
+            job.nodes = nodes;
+            job.move_overhead = move_overhead_ms;
+            start_search_job(job);
         }
 
 
         else if (line == "stop")
         {
-            stop_search_now();
-
-            if (search_thread.joinable())
-                search_thread.join();
-
-            searching = false;
+            stop_search_and_wait();
         }
 
 
         else if (line == "quit")
         {
-            stop_search_now();
-
-            if (search_thread.joinable())
-                search_thread.join();
-
+            shutdown_search_worker();
             break;
         }
     }
+
+    shutdown_search_worker();
 }
 
 

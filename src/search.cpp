@@ -58,14 +58,14 @@ static int init_lmr_table = []() {
     return 0;
     }();
 
-static Move killer_moves[2][MAX_PLY];
-static int  history_heuristic[64][64];
+static thread_local Move killer_moves[2][MAX_PLY];
+static thread_local int  history_heuristic[64][64];
 
-static Move countermove[64][64];
+static thread_local Move countermove[64][64];
 
-static int cont_history[PIECE_NB][64][PIECE_NB][64];
+static thread_local int cont_history[PIECE_NB][64][PIECE_NB][64];
 
-static int capture_history[16][64][16];
+static thread_local int capture_history[16][64][16];
 
 // Eval Correction Tables
 constexpr int CORR_SIZE = 16384;
@@ -73,23 +73,35 @@ constexpr int CORR_MASK = CORR_SIZE - 1;
 constexpr int CORR_HISTORY_LIMIT = 8192;
 constexpr int CORR_BONUS_LIMIT = CORR_HISTORY_LIMIT / 4;
 
-static int pawn_corr[2][CORR_SIZE];
-static int non_pawn_corr[2][2][CORR_SIZE];
-static int cont_corr[PIECE_NB][64];
+static thread_local int pawn_corr[2][CORR_SIZE];
+static thread_local int non_pawn_corr[2][2][CORR_SIZE];
+static thread_local int cont_corr[PIECE_NB][64];
 
 
 
-static std::atomic<bool> stop_flag(false);
-static uint64_t nodes_count = 0;
-static uint64_t target_max_nodes = 0;
-static bool target_nodes_soft = false;
-static int seldepth = 0;
-static int nmp_min_ply = 0;
+static std::atomic<uint64_t> global_stop_epoch(0);
+static thread_local uint64_t local_stop_epoch = 0;
+static thread_local bool stop_flag = false;
+static thread_local uint64_t nodes_count = 0;
+static thread_local uint64_t target_max_nodes = 0;
+static thread_local bool target_nodes_soft = false;
+static thread_local int seldepth = 0;
+static thread_local int nmp_min_ply = 0;
 
-static Move pv_table[MAX_PLY][MAX_PLY];
-static int  pv_length[MAX_PLY];
+static thread_local Move pv_table[MAX_PLY][MAX_PLY];
+static thread_local int  pv_length[MAX_PLY];
 
-static TimeManager tm;
+static thread_local TimeManager tm;
+
+static inline bool external_stop_requested()
+{
+    return global_stop_epoch.load(std::memory_order_relaxed) != local_stop_epoch;
+}
+
+static inline bool search_stop_requested()
+{
+    return stop_flag || external_stop_requested();
+}
 
 static inline int draw_score()
 {
@@ -174,7 +186,7 @@ static void update_eval_correction(const Position& pos, const SearchStack* ss, i
 
 static void update_hard_time()
 {
-    if (stop_flag) return;
+    if (search_stop_requested()) return;
 
     if (!target_nodes_soft && target_max_nodes > 0 && nodes_count >= target_max_nodes) {
         stop_flag = true;
@@ -187,6 +199,7 @@ static void update_hard_time()
 
 void stop_search_now()
 {
+    global_stop_epoch.fetch_add(1, std::memory_order_seq_cst);
     stop_flag = true;
 }
 
@@ -485,7 +498,7 @@ struct RootSearchContext {
     uint64_t best_move_nodes = 0;
 };
 
-static RootSearchContext* active_root_context = nullptr;
+static thread_local RootSearchContext* active_root_context = nullptr;
 
 static void set_root_pv(RootMove& root_move, Move move, int child_ply)
 {
@@ -533,7 +546,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     if ((nodes_count & pollMaskQ) == 0)
         update_hard_time();
 
-    if (stop_flag)
+    if (search_stop_requested())
         return alpha;
 
     bool inChk = in_check(pos, pos.side_to_move());
@@ -630,7 +643,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         int score = -qsearch(pos, -beta, -alpha, ply + 1, ss);
         pos.undo_move();
 
-        if (stop_flag)
+        if (search_stop_requested())
             return alpha;
 
         if (score >= beta) {
@@ -677,7 +690,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
     if (ply > seldepth) seldepth = ply;
 
-    if (stop_flag) return alpha;
+    if (search_stop_requested()) return alpha;
     bool inChk = in_check(pos, pos.side_to_move());
     if (ply >= MAX_PLY - 1) return inChk ? draw_score() : eval_from_stack(pos, ss, ply);
     nodes_count++;
@@ -799,7 +812,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             int null_score = -negamax<NonPV>(pos, depth - R - 1, -beta, -beta + 1, ply + 1, ss, true, false);
             pos.undo_null_move();
 
-            if (stop_flag)
+            if (search_stop_requested())
                 return alpha;
 
             if (null_score >= beta)
@@ -811,7 +824,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                     int verified_score = negamax<NonPV>(pos, depth - R, beta - 1, beta, ply, ss, false, false);
                     nmp_min_ply = previous_nmp_min_ply;
 
-                    if (stop_flag)
+                    if (search_stop_requested())
                         return alpha;
 
                     if (verified_score >= beta) {
@@ -855,7 +868,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
                         pos.undo_move();
 
-                        if (stop_flag)
+                        if (search_stop_requested())
                         {
                             ss[ply].current_move = 0;
                             ss[ply].moved_piece = NO_PIECE;
@@ -1016,7 +1029,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             int singular_score = negamax<NonPV>(pos, (depth - 1) / 2, singular_beta - 1, singular_beta, ply, ss, false, cutNode);
             ss[ply].excluded_move = 0;
 
-            if (stop_flag)
+            if (search_stop_requested())
                 return alpha;
 
             if (singular_score < singular_beta) {
@@ -1198,7 +1211,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                     root_move.score = -INF;
                 }
 
-                if (!stop_flag && score > active_root_context->best_score) {
+                if (!search_stop_requested() && score > active_root_context->best_score) {
                     active_root_context->best_score = score;
                     active_root_context->best_move = m;
                     active_root_context->best_move_nodes = root_move.nodes;
@@ -1206,7 +1219,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
 
-        if (stop_flag) break;
+        if (search_stop_requested()) break;
 
         best_score = std::max(best_score, score);
 
@@ -1311,7 +1324,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 break;
         }
     }
-    if (stop_flag)
+    if (search_stop_requested())
         return alpha;
 
     if (legal_moves == 0) {
@@ -1330,7 +1343,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     if (root_has_best && best_move == 0)
         best_move = active_root_context->best_move;
 
-    if (!stop_flag && best_move != 0)
+    if (!search_stop_requested() && best_move != 0)
     {
         const int histDepth = depth
             + (!inChk && staticEval <= original_alpha ? 1 : 0)
@@ -1538,6 +1551,7 @@ SearchResult search(Position& pos,
     int move_overhead,
     bool soft_node_limit)
 {
+    local_stop_epoch = global_stop_epoch.load(std::memory_order_relaxed);
     stop_flag = false;
     nodes_count = 0;
     target_max_nodes = max_nodes;
@@ -1620,7 +1634,7 @@ SearchResult search(Position& pos,
 
 
         update_hard_time();
-        if (stop_flag)
+        if (search_stop_requested())
             break;
 
         prepare_root_moves_for_depth(root_moves, root_count);
@@ -1653,7 +1667,7 @@ SearchResult search(Position& pos,
             const int root_score = negamax<Root>(pos, adjusted_depth, alpha, beta, 0, ss);
             active_root_context = nullptr;
 
-            if (stop_flag) break;
+            if (search_stop_requested()) break;
 
             best_score = (root_context.best_move != 0) ? root_context.best_score : root_score;
             std::stable_sort(root_moves, root_moves + root_count, root_move_less);
@@ -1679,7 +1693,7 @@ SearchResult search(Position& pos,
 
         }
 
-        if (stop_flag) break;
+        if (search_stop_requested()) break;
 
         if (current_depth_best_move != 0)
         {
