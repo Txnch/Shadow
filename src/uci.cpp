@@ -5,7 +5,9 @@
 #include "move.h"
 #include "tt.h"
 #include "evaluate.h"
+#include "nnue.h"
 #include "wdl.h"
+#include "bench.h"
 
 #include <iostream>
 #include <sstream>
@@ -15,6 +17,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <iomanip>
+#include <limits>
 #include <condition_variable>
 #include <mutex>
 
@@ -36,6 +40,7 @@ struct SearchJob {
     bool infinite = false;
     uint64_t nodes = 0;
     int move_overhead = DEFAULT_MOVE_OVERHEAD_MS;
+    uint64_t stop_epoch_baseline = std::numeric_limits<uint64_t>::max();
 };
 
 static std::thread search_thread;
@@ -159,7 +164,9 @@ static void search_worker_loop()
             job.moves_to_go,
             job.infinite,
             job.nodes,
-            job.move_overhead);
+            job.move_overhead,
+            false,
+            job.stop_epoch_baseline);
 
         print_bestmove(result.best_move);
 
@@ -221,6 +228,7 @@ static void start_search_job(const SearchJob& job)
         return;
 
     pending_search_job = job;
+    pending_search_job.stop_epoch_baseline = current_stop_epoch();
     search_worker_has_job = true;
     searching = true;
     search_cv.notify_one();
@@ -245,6 +253,98 @@ static void shutdown_search_worker()
     search_worker_started = false;
     search_worker_quit = false;
     searching = false;
+}
+
+static char piece_to_char(Piece pc)
+{
+    char c = ' ';
+    switch (piece_type(pc))
+    {
+    case PAWN:   c = 'P'; break;
+    case KNIGHT: c = 'N'; break;
+    case BISHOP: c = 'B'; break;
+    case ROOK:   c = 'R'; break;
+    case QUEEN:  c = 'Q'; break;
+    case KING:   c = 'K'; break;
+    default:     return ' ';
+    }
+
+    return piece_color(pc) == BLACK
+        ? static_cast<char>(std::tolower(static_cast<unsigned char>(c)))
+        : c;
+}
+
+static std::string center_cell_text(const std::string& text)
+{
+    static constexpr int CELL_WIDTH = 8;
+
+    if (text.size() >= CELL_WIDTH)
+        return text.substr(0, CELL_WIDTH);
+
+    const int padding = CELL_WIDTH - static_cast<int>(text.size());
+    const int left = padding / 2;
+    const int right = padding - left;
+
+    return std::string(left, ' ') + text + std::string(right, ' ');
+}
+
+static std::string format_trace_score(int score)
+{
+    score = std::clamp(score, -99999, 99999);
+
+    std::ostringstream ss;
+    ss << std::showpos << std::fixed << std::setprecision(2)
+        << (score / 100.0);
+
+    return ss.str();
+}
+
+static int white_pov_score(int score, Color stm)
+{
+    return stm == WHITE ? score : -score;
+}
+
+static void print_eval_table(const Position& pos)
+{
+    nnue::AccumulatorPair base_pair{};
+    nnue::refresh_pair(pos, base_pair);
+
+    const Color stm = pos.side_to_move();
+    const int base_eval = white_pov_score(nnue::evaluate_from_pair(base_pair, pos), stm);
+    const std::string separator = "+--------+--------+--------+--------+--------+--------+--------+--------+\n";
+
+    for (int rank = 7; rank >= 0; --rank)
+    {
+        std::cout << separator;
+
+        for (int file = 0; file < 8; ++file)
+        {
+            const Square sq = Square(rank * 8 + file);
+            const char pc = piece_to_char(pos.piece_on(sq));
+            const std::string text = pc == ' ' ? std::string() : std::string(1, pc);
+            std::cout << "|" << center_cell_text(text);
+        }
+        std::cout << "|\n";
+
+        for (int file = 0; file < 8; ++file)
+        {
+            const Square sq = Square(rank * 8 + file);
+            const Piece pc = pos.piece_on(sq);
+            std::string text;
+
+            if (pc != NO_PIECE && piece_type(pc) != KING)
+            {
+                const int without_eval = white_pov_score(
+                    nnue::evaluate_without_piece(base_pair, pos, sq), stm);
+                text = format_trace_score(base_eval - without_eval);
+            }
+
+            std::cout << "|" << center_cell_text(text);
+        }
+        std::cout << "|\n";
+    }
+
+    std::cout << separator << std::flush;
 }
 
 
@@ -280,21 +380,36 @@ void uci_loop()
 
         else if (line == "eval")
         {
-            int raw_eval = evaluate(pos);
-            int normalized_eval = wdl::normalize_score(raw_eval, pos);
+            print_eval_table(pos);
 
-            std::cout << "--------------------------------\n";
-            std::cout << "info string Pure NNUE Eval: " << normalized_eval
-                << " cp (raw " << raw_eval << ")\n";
-            if (g_uci_show_wdl.load(std::memory_order_relaxed))
+            const int raw_eval = evaluate(pos);
+            const int normalized_eval = wdl::normalize_score(raw_eval, pos);
+
+            std::cout << "Raw eval: " << raw_eval << " cp\n";
+            std::cout << "Normalized score: " << normalized_eval << " cp\n" << std::flush;
+        }
+
+        else if (line.rfind("bench", 0) == 0)
+        {
+            stop_search_and_wait();
+
+            int depth = 10;
+            std::istringstream ss(line);
+            std::string token;
+            ss >> token;
+
+            if (ss >> token)
             {
-                const wdl::WDL model = wdl::model(raw_eval, pos);
-                std::cout << "info string WDL: " << model.win << " "
-                    << model.draw << " " << model.loss << "\n";
+                if (token == "depth")
+                    ss >> depth;
+                else
+                {
+                    try { depth = std::stoi(token); }
+                    catch (...) {}
+                }
             }
-            std::cout << "info string Side to move: " << (pos.side_to_move() == WHITE ? "White" : "Black") << "\n";
-            std::cout << "--------------------------------\n";
-            std::cout << std::flush;
+
+            Shadow::Bench::run(std::cout, depth);
         }
 
         else if (line.rfind("setoption", 0) == 0)

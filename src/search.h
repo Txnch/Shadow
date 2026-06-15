@@ -18,6 +18,7 @@ struct SearchResult
 };
 
 void stop_search_now();
+uint64_t current_stop_epoch();
 void clear_search_state_for_new_game();
 
 SearchResult search(Position& pos,
@@ -29,4 +30,5 @@ SearchResult search(Position& pos,
     bool infinite,
     uint64_t max_nodes = 0,
     int move_overhead = 10,
-    bool soft_node_limit = false);
+    bool soft_node_limit = false,
+    uint64_t stop_epoch_baseline = UINT64_MAX);

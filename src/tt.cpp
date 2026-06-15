@@ -167,8 +167,6 @@ void tt_clear() {
 }
 
 TTEntry* tt_probe(uint64_t key) {
-    ensure_table();
-
     TTBucket& b = table[size_t(key & g_mask)];
     for (int w = 0; w < TT_WAYS; ++w)
         if (b.e[w].key == key)
@@ -178,8 +176,6 @@ TTEntry* tt_probe(uint64_t key) {
 }
 
 void tt_prefetch(uint64_t key) {
-    ensure_table();
-
     const TTBucket& b = table[size_t(key & g_mask)];
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     _mm_prefetch(reinterpret_cast<const char*>(&b), _MM_HINT_T0);
@@ -207,8 +203,6 @@ int tt_hashfull() {
 }
 
 void tt_store(uint64_t key, int depth, int score, TTFlag flag, Move best_move, int static_eval) {
-    ensure_table();
-
     TTBucket& b = table[size_t(key & g_mask)];
     TTEntry* e = pick_replacement(b, key);
 

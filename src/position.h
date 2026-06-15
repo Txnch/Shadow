@@ -41,6 +41,7 @@ public:
     Bitboard pieces(PieceType pt) const;
     Bitboard all_pieces() const { return occ_all; }
     Piece piece_on(Square s) const;
+    Position copy_without_piece(Square s) const;
     Square king_square(Color c) const;
     bool gives_check(Move m) const;
     bool is_legal(Move m) const;
@@ -66,6 +67,13 @@ public:
     }
 
 private:
+    struct CheckInfo {
+        Bitboard checkers_bb = BB_EMPTY;
+        std::array<Bitboard, COLOR_NB> blockers_for_king_bb{ BB_EMPTY, BB_EMPTY };
+        std::array<Bitboard, COLOR_NB> pinners_bb{ BB_EMPTY, BB_EMPTY };
+        std::array<Bitboard, PIECE_TYPE_NB> check_squares_bb{};
+    };
+
     std::array<Bitboard, PIECE_NB> piece_bb{};
     std::array<Piece, SQUARE_NB> board{};
 
@@ -80,6 +88,7 @@ private:
 
     static constexpr int MAX_GAME_PLY = 2048;
     std::array<Undo, MAX_GAME_PLY> history{};
+    std::array<CheckInfo, MAX_GAME_PLY> check_history{};
     int ply = 0;
     int last_null_ply = -1;
     uint64_t hash_key = 0;

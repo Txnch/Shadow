@@ -33,6 +33,9 @@ inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
 inline constexpr int ROOT_ASPIRATION_WIDENING_FACTOR = 17;
 inline constexpr int ROOT_ASPIRATION_REDUCTION_MAX = 3;
 inline constexpr int QS_MAX_PLY_GUARD = MAX_PLY - 4;
+inline constexpr int SINGULAR_BETA_MARGIN = 64;
+inline constexpr int SINGULAR_DOUBLE_EXT_MARGIN = 13;
+inline constexpr int SINGULAR_TRIPLE_EXT_MARGIN = 121;
 
 enum NodeType {
     Root,
@@ -143,6 +146,53 @@ struct SearchStack {
     bool acc_valid = false;
 };
 
+static bool is_shuffling(Move m, const SearchStack* ss, int ply, const Position& pos)
+{
+    if (is_capture(m) || is_promotion(m) || pos.halfmove_clock() < 10)
+        return false;
+
+    if (ply < 20)
+        return false;
+
+    const Move prev_same_side = ss[ply - 2].current_move;
+    const Move older_same_side = ss[ply - 4].current_move;
+    if (!prev_same_side || !older_same_side)
+        return false;
+
+    return from_sq(m) == to_sq(prev_same_side)
+        && from_sq(prev_same_side) == to_sq(older_same_side);
+}
+
+struct SearchMoveBuffer {
+    Move quiet_searched[MAX_MOVES]{};
+    Piece quiet_pieces[MAX_MOVES]{};
+    Move capture_searched[MAX_MOVES]{};
+    Piece capture_attackers[MAX_MOVES]{};
+    Piece capture_victims[MAX_MOVES]{};
+};
+
+static constexpr int SEARCH_MOVE_BUFFER_COUNT = MAX_PLY * 4;
+static thread_local std::unique_ptr<SearchMoveBuffer[]> search_move_buffers;
+static thread_local int search_move_buffer_depth = 0;
+
+struct SearchMoveBufferScope {
+    SearchMoveBuffer* buffer = nullptr;
+
+    SearchMoveBufferScope()
+    {
+        if (!search_move_buffers)
+            search_move_buffers = std::make_unique<SearchMoveBuffer[]>(SEARCH_MOVE_BUFFER_COUNT);
+
+        const int index = search_move_buffer_depth++;
+        buffer = &search_move_buffers[std::min(index, SEARCH_MOVE_BUFFER_COUNT - 1)];
+    }
+
+    ~SearchMoveBufferScope()
+    {
+        --search_move_buffer_depth;
+    }
+};
+
 // Eval Correction Helpers
 static int get_eval_correction(const Position& pos, const SearchStack* ss, int ply)
 {
@@ -201,6 +251,11 @@ void stop_search_now()
 {
     global_stop_epoch.fetch_add(1, std::memory_order_seq_cst);
     stop_flag = true;
+}
+
+uint64_t current_stop_epoch()
+{
+    return global_stop_epoch.load(std::memory_order_relaxed);
 }
 
 void clear_search_state_for_new_game()
@@ -915,13 +970,16 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     Move best_move = 0;
     int  best_score = -INF;
 
-    Move quiet_searched[256];
-    Piece quiet_pieces[256];
+    SearchMoveBufferScope move_buffer_scope;
+    SearchMoveBuffer& move_buffer = *move_buffer_scope.buffer;
+
+    Move* quiet_searched = move_buffer.quiet_searched;
+    Piece* quiet_pieces = move_buffer.quiet_pieces;
     int  quiet_count = 0;
 
-    Move capture_searched[256];
-    Piece capture_attackers[256];
-    Piece capture_victims[256];
+    Move* capture_searched = move_buffer.capture_searched;
+    Piece* capture_attackers = move_buffer.capture_attackers;
+    Piece* capture_victims = move_buffer.capture_victims;
     int  capture_count = 0;
 
     bool skip_quiets = false;
@@ -1004,26 +1062,22 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         const bool givesChk = pos.gives_check(m);
 
         int ext = 0;
+        const bool tt_has_lower_bound = tt_flag == TT_BETA || tt_flag == TT_EXACT;
         if (!isRoot
             && m == tt_move
-            && depth >= 7
+            && depth >= 6 + (ss[ply].tt_pv ? 1 : 0)
             && ss[ply].excluded_move == 0
             && tt_hit
             && tt_depth >= depth - 3
-            && tt_flag != TT_ALPHA
-            && std::abs(tt_score) < MATE_SCORE - MAX_PLY)
+            && tt_has_lower_bound
+            && std::abs(tt_score) < MATE_SCORE - MAX_PLY
+            && !is_shuffling(m, ss, ply, pos))
         {
             if (!pos.make_move(m, true))
                 continue;
             pos.undo_move();
 
-            int singular_margin = 15 + depth * 2;
-
-            if (ss[ply].tt_pv && !isPV) {
-                singular_margin += depth;
-            }
-
-            int singular_beta = tt_score - singular_margin;
+            int singular_beta = tt_score - (depth * SINGULAR_BETA_MARGIN) / 64;
 
             ss[ply].excluded_move = m;
             int singular_score = negamax<NonPV>(pos, (depth - 1) / 2, singular_beta - 1, singular_beta, ply, ss, false, cutNode);
@@ -1033,20 +1087,20 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 return alpha;
 
             if (singular_score < singular_beta) {
-                ext = 1;
-
-                if (!isPV && singular_score < singular_beta - 20) {
-                    ext = 2;
-                }
+                if (!isPV && singular_score < singular_beta - SINGULAR_DOUBLE_EXT_MARGIN)
+                    ext = 2 + (isQuiet && singular_score < singular_beta - SINGULAR_TRIPLE_EXT_MARGIN);
+                else
+                    ext = 1;
             }
-            else if (singular_score >= beta) {
-                ext = -1;
+            else if (singular_score >= beta
+                && std::abs(singular_score) < MATE_SCORE - MAX_PLY) {
+                return singular_score;
             }
             else if (tt_score >= beta) {
-                ext = -1;
+                ext = isPV ? -2 : -3;
             }
             else if (cutNode) {
-                ext = -1;
+                ext = -2;
             }
         }
 
@@ -1549,9 +1603,12 @@ SearchResult search(Position& pos,
     bool infinite,
     uint64_t max_nodes,
     int move_overhead,
-    bool soft_node_limit)
+    bool soft_node_limit,
+    uint64_t stop_epoch_baseline)
 {
-    local_stop_epoch = global_stop_epoch.load(std::memory_order_relaxed);
+    local_stop_epoch = stop_epoch_baseline == UINT64_MAX
+        ? global_stop_epoch.load(std::memory_order_relaxed)
+        : stop_epoch_baseline;
     stop_flag = false;
     nodes_count = 0;
     target_max_nodes = max_nodes;
@@ -1597,7 +1654,8 @@ SearchResult search(Position& pos,
 
     MoveList legal_root_moves;
     generate_legal_root_moves(pos, legal_root_moves);
-    RootMove root_moves[256];
+    std::unique_ptr<RootMove[]> root_moves_storage = std::make_unique<RootMove[]>(MAX_MOVES);
+    RootMove* root_moves = root_moves_storage.get();
     const int root_count = legal_root_moves.size;
     for (int i = 0; i < root_count; ++i)
     {

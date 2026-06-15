@@ -35,7 +35,9 @@ namespace nnue {
 
     int evaluate(const Position& pos);
     int evaluate_from_pair(const AccumulatorPair& pair, const Position& pos);
+    int evaluate_without_piece(const AccumulatorPair& base_pair, const Position& pos, Square sq);
 
+    void refresh_pair(const Position& pos, AccumulatorPair& pair);
     void refresh_acc(const Position& pos, Color pov, int16_t out_acc[HIDDEN]);
 
     int feature_index_stm_manual(Color pov, Piece pc, Square sq);

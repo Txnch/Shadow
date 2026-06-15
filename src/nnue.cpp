@@ -225,9 +225,14 @@ namespace nnue {
         return &g_W1[size_t(feat_idx) * HIDDEN];
     }
 
-    static inline int output_bucket(const Position& pos) {
-        const int pieces = popcount(pos.all_pieces()) - 2;
+    static inline int output_bucket_from_non_king_count(int pieces) {
+        if (pieces < 0)
+            pieces = 0;
         return std::clamp(pieces / BUCKET_DIVISOR, 0, OUTPUT_BUCKETS - 1);
+    }
+
+    static inline int output_bucket(const Position& pos) {
+        return output_bucket_from_non_king_count(popcount(pos.all_pieces()) - 2);
     }
 
     static int evaluate_from_accs(const int16_t acc_stm[HIDDEN],
@@ -246,16 +251,34 @@ namespace nnue {
         return static_cast<int>(output);
     }
 
-    int evaluate_from_pair(const AccumulatorPair& pair, const Position& pos) {
+    static int evaluate_from_pair_impl(const AccumulatorPair& pair, Color stm, int non_king_pieces) {
         if (!g_ready)
             return 0;
 
-        const Color stm = pos.side_to_move();
-        const int bucket = output_bucket(pos);
+        const int bucket = output_bucket_from_non_king_count(non_king_pieces);
 
         return stm == WHITE
             ? evaluate_from_accs(pair.white, pair.black, bucket)
             : evaluate_from_accs(pair.black, pair.white, bucket);
+    }
+
+    int evaluate_from_pair(const AccumulatorPair& pair, const Position& pos) {
+        return evaluate_from_pair_impl(pair, pos.side_to_move(), popcount(pos.all_pieces()) - 2);
+    }
+
+    int evaluate_without_piece(const AccumulatorPair& base_pair, const Position& pos, Square sq) {
+        if (!g_ready || sq < SQ_A1 || sq > SQ_H8)
+            return evaluate_from_pair(base_pair, pos);
+
+        const Piece pc = pos.piece_on(sq);
+        if (pc == NO_PIECE || piece_type(pc) == KING)
+            return evaluate_from_pair(base_pair, pos);
+
+        AccumulatorPair adjusted = base_pair;
+        sub_feature(adjusted.white, feature_index_stm(WHITE, pc, sq));
+        sub_feature(adjusted.black, feature_index_stm(BLACK, pc, sq));
+
+        return evaluate_from_pair_impl(adjusted, pos.side_to_move(), popcount(pos.all_pieces()) - 3);
     }
 
     bool init(const std::string& filepath) {
@@ -294,6 +317,11 @@ namespace nnue {
 
     int feature_index_stm_manual(Color pov, Piece pc, Square sq) {
         return feature_index_stm(pov, pc, sq);
+    }
+
+    void refresh_pair(const Position& pos, AccumulatorPair& pair) {
+        refresh_acc(pos, WHITE, pair.white);
+        refresh_acc(pos, BLACK, pair.black);
     }
 
     void refresh_acc(const Position& pos, Color pov, int16_t out_acc[HIDDEN]) {
@@ -361,8 +389,7 @@ namespace nnue {
             return 0;
 
         AccumulatorPair pair{};
-        refresh_acc(pos, WHITE, pair.white);
-        refresh_acc(pos, BLACK, pair.black);
+        refresh_pair(pos, pair);
         return evaluate_from_pair(pair, pos);
     }
 

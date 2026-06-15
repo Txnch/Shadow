@@ -392,6 +392,29 @@ Piece Position::piece_on(Square s) const {
     return board[s];
 }
 
+Position Position::copy_without_piece(Square s) const {
+    assert(s >= SQ_A1 && s <= SQ_H8);
+
+    Position out(*this);
+    const Piece pc = out.board[s];
+    if (pc == NO_PIECE)
+        return out;
+
+    const Bitboard bb = square_bb(s);
+    const Color c = piece_color(pc);
+    const uint64_t z = zobrist_piece[pc][s];
+
+    out.board[s] = NO_PIECE;
+    out.piece_bb[pc] &= ~bb;
+    out.occ[c] &= ~bb;
+    out.occ_all &= ~bb;
+    out.hash_key ^= z;
+    aux_xor_piece_keys(pc, z, out.pawn_hash_key, out.non_pawn_hash_key);
+    out.refresh_check_info();
+
+    return out;
+}
+
 Bitboard Position::pieces(Color c) const { return occ[c]; }
 
 Bitboard Position::pieces(PieceType pt) const {
@@ -838,6 +861,7 @@ bool Position::make_move(Move m, bool assume_pseudo_legal) {
     assert(p != NO_PIECE);
     assert(piece_color(p) == side);
 
+    const int history_idx = ply;
     Undo& u = history[ply++];
     u.is_null = false;
     u.move = m;
@@ -853,6 +877,11 @@ bool Position::make_move(Move m, bool assume_pseudo_legal) {
     u.castling_rights = castling_right;
     u.captured = NO_PIECE;
     u.captured_sq = SQ_NONE;
+    CheckInfo& ci = check_history[history_idx];
+    ci.checkers_bb = checkers_bb;
+    ci.blockers_for_king_bb = blockers_for_king_bb;
+    ci.pinners_bb = pinners_bb;
+    ci.check_squares_bb = check_squares_bb;
     u.dp = {};
 
     Color us = side;
@@ -1052,13 +1081,18 @@ void Position::undo_move() {
         occ_all |= square_bb(sq);
     }
 
-    refresh_check_info();
+    const CheckInfo& ci = check_history[ply];
+    checkers_bb = ci.checkers_bb;
+    blockers_for_king_bb = ci.blockers_for_king_bb;
+    pinners_bb = ci.pinners_bb;
+    check_squares_bb = ci.check_squares_bb;
 }
 void Position::do_null_move() {
     assert(ply < MAX_GAME_PLY);
 
     const int null_ply = ply;
     Undo& u = history[ply++];
+    CheckInfo& ci = check_history[null_ply];
 
     u.is_null = true;
     u.move = 0;
@@ -1073,6 +1107,10 @@ void Position::do_null_move() {
     u.halfmove_clock = halfmove_clock_state;
     u.fullmove_number = fullmove_number_state;
     u.previous_null_ply = last_null_ply;
+    ci.checkers_bb = checkers_bb;
+    ci.blockers_for_king_bb = blockers_for_king_bb;
+    ci.pinners_bb = pinners_bb;
+    ci.check_squares_bb = check_squares_bb;
     u.dp = {};
 
 
@@ -1103,6 +1141,10 @@ void Position::undo_null_move() {
     halfmove_clock_state = u.halfmove_clock;
     fullmove_number_state = u.fullmove_number;
     last_null_ply = u.previous_null_ply;
-    refresh_check_info();
+    const CheckInfo& ci = check_history[ply];
+    checkers_bb = ci.checkers_bb;
+    blockers_for_king_bb = ci.blockers_for_king_bb;
+    pinners_bb = ci.pinners_bb;
+    check_squares_bb = ci.check_squares_bb;
 }
 

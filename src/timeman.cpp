@@ -6,7 +6,6 @@
 namespace {
 
     constexpr int DEFAULT_MOVE_OVERHEAD_MS = 10;
-    constexpr int FIXED_MOVETIME_OVERHEAD_MS = 10;
     constexpr int MAX_MOVE_OVERHEAD_MS = 5000;
     constexpr int SCORE_STABILITY_MARGIN_CP = 10;
     constexpr int SCORE_STABILITY_MIN_DEPTH = 5;
@@ -65,7 +64,7 @@ void TimeManager::set_limits(bool infinite,
     int moveOverhead) {
     infinite_mode = infinite;
     fixed_movetime = false;
-    time_limited = !infinite && (move_time > 0 || timeLeft > 0);
+    time_limited = !infinite && (move_time > 0 || timeLeft >= 0 || inc > 0);
     game_ply = std::max(0, gamePly);
     move_overhead = clampi(moveOverhead, 0, MAX_MOVE_OVERHEAD_MS);
 
@@ -85,7 +84,7 @@ void TimeManager::set_limits(bool infinite,
         fixed_movetime = true;
         time_limited = true;
 
-        const int margin = std::min(FIXED_MOVETIME_OVERHEAD_MS, std::max(0, move_time - 1));
+        const int margin = std::min(move_overhead, std::max(0, move_time - 1));
         const int bound = std::max(1, move_time - margin);
 
         optimum_time = bound;
@@ -101,17 +100,19 @@ void TimeManager::set_limits(bool infinite,
 }
 
 void TimeManager::compute_time() {
-    if (time_left <= 0) {
-        optimum_time = maximum_time = 0;
+    const int available_time = std::max(0, time_left - move_overhead);
+
+    if (available_time <= 0) {
+        optimum_time = maximum_time = 1;
         return;
     }
 
     const int default_mtg = increment > 0 ? 35 : 45;
     const int mtg = (moves_to_go > 0 ? moves_to_go : default_mtg) + 5;
-    const int soft = (time_left - increment) / std::max(1, mtg) + increment * 3 / 4;
-    const int hard = time_left / 2;
+    const int soft = (available_time - increment) / std::max(1, mtg) + increment * 3 / 4;
+    const int hard = available_time / 2;
 
-    base_optimum_time = std::max(1, soft);
+    base_optimum_time = std::clamp(soft, 1, std::max(1, hard));
     optimum_time = base_optimum_time;
     maximum_time = std::max(1, hard);
 }
@@ -176,7 +177,7 @@ void TimeManager::update_after_iteration(int depth,
 
     target = std::max(target, double(base_optimum_time) * 0.75);
 
-    optimum_time = std::max(1, int(target));
+    optimum_time = std::clamp(int(target), 1, maximum_time);
 }
 
 void TimeManager::start() {
