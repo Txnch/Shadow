@@ -16,8 +16,8 @@
 bool g_silent_search = false;
 std::atomic<bool> g_uci_show_wdl(false);
 
-inline constexpr int INF = 30000;
-inline constexpr int MATE_SCORE = 29000;
+inline constexpr int INF = SEARCH_INF;
+inline constexpr int MATE_SCORE = SEARCH_MATE_SCORE;
 inline constexpr int MAX_EVAL_SCORE = MATE_SCORE - 1000;
 
 inline constexpr int HISTORY_CLAMP = 16384;
@@ -46,6 +46,7 @@ enum NodeType {
 // LMR
 inline constexpr int LMR_SCALE = 1024;
 inline constexpr int LMR_CHECK_REDUCTION = 851;
+inline constexpr uint64_t SEARCH_POLL_MASK = 4095ULL;
 
 static int LMR_TABLE[2][64][256];
 
@@ -61,54 +62,24 @@ static int init_lmr_table = []() {
     return 0;
     }();
 
-static thread_local Move killer_moves[2][MAX_PLY];
-static thread_local int  history_heuristic[64][64];
-
-static thread_local Move countermove[64][64];
-
-static thread_local int cont_history[PIECE_NB][64][PIECE_NB][64];
-
-static thread_local int capture_history[16][64][16];
-
-// Eval Correction Tables
-constexpr int CORR_SIZE = 16384;
-constexpr int CORR_MASK = CORR_SIZE - 1;
-constexpr int CORR_HISTORY_LIMIT = 8192;
-constexpr int CORR_BONUS_LIMIT = CORR_HISTORY_LIMIT / 4;
-
-static thread_local int pawn_corr[2][CORR_SIZE];
-static thread_local int non_pawn_corr[2][2][CORR_SIZE];
-static thread_local int cont_corr[PIECE_NB][64];
-
-
-
 static std::atomic<uint64_t> global_stop_epoch(0);
-static thread_local uint64_t local_stop_epoch = 0;
-static thread_local bool stop_flag = false;
-static thread_local uint64_t nodes_count = 0;
-static thread_local uint64_t target_max_nodes = 0;
-static thread_local bool target_nodes_soft = false;
-static thread_local int seldepth = 0;
-static thread_local int nmp_min_ply = 0;
-
-static thread_local Move pv_table[MAX_PLY][MAX_PLY];
-static thread_local int  pv_length[MAX_PLY];
-
+static thread_local SearchThreadState search_state;
 static thread_local TimeManager tm;
+static thread_local std::unique_ptr<SearchMoveBuffer[]> search_move_buffers;
 
 static inline bool external_stop_requested()
 {
-    return global_stop_epoch.load(std::memory_order_relaxed) != local_stop_epoch;
+    return global_stop_epoch.load(std::memory_order_relaxed) != search_state.local_stop_epoch;
 }
 
 static inline bool search_stop_requested()
 {
-    return stop_flag || external_stop_requested();
+    return search_state.stop_flag || external_stop_requested();
 }
 
 static inline int draw_score()
 {
-    return -1 + (nodes_count & 2);
+    return -1 + (search_state.nodes_count & 2);
 }
 
 static inline int clamp_eval_score(int score)
@@ -136,16 +107,6 @@ static inline int stat_malus(int depth)
     return std::min(STAT_MALUS_MULT * depth - STAT_MALUS_BASE, STAT_MALUS_MAX);
 }
 
-struct SearchStack {
-    Move current_move = 0;
-    Piece moved_piece = NO_PIECE;
-    int static_eval = -INF;
-    bool tt_pv = false;
-    Move excluded_move = 0;
-    nnue::AccumulatorPair acc{};
-    bool acc_valid = false;
-};
-
 static bool is_shuffling(Move m, const SearchStack* ss, int ply, const Position& pos)
 {
     if (is_capture(m) || is_promotion(m) || pos.halfmove_clock() < 10)
@@ -163,18 +124,6 @@ static bool is_shuffling(Move m, const SearchStack* ss, int ply, const Position&
         && from_sq(prev_same_side) == to_sq(older_same_side);
 }
 
-struct SearchMoveBuffer {
-    Move quiet_searched[MAX_MOVES]{};
-    Piece quiet_pieces[MAX_MOVES]{};
-    Move capture_searched[MAX_MOVES]{};
-    Piece capture_attackers[MAX_MOVES]{};
-    Piece capture_victims[MAX_MOVES]{};
-};
-
-static constexpr int SEARCH_MOVE_BUFFER_COUNT = MAX_PLY * 4;
-static thread_local std::unique_ptr<SearchMoveBuffer[]> search_move_buffers;
-static thread_local int search_move_buffer_depth = 0;
-
 struct SearchMoveBufferScope {
     SearchMoveBuffer* buffer = nullptr;
 
@@ -183,13 +132,13 @@ struct SearchMoveBufferScope {
         if (!search_move_buffers)
             search_move_buffers = std::make_unique<SearchMoveBuffer[]>(SEARCH_MOVE_BUFFER_COUNT);
 
-        const int index = search_move_buffer_depth++;
+        const int index = search_state.move_buffer_depth++;
         buffer = &search_move_buffers[std::min(index, SEARCH_MOVE_BUFFER_COUNT - 1)];
     }
 
     ~SearchMoveBufferScope()
     {
-        --search_move_buffer_depth;
+        --search_state.move_buffer_depth;
     }
 };
 
@@ -199,14 +148,14 @@ static int get_eval_correction(const Position& pos, const SearchStack* ss, int p
     int stm = pos.side_to_move();
     int score = 0;
 
-    score += pawn_corr[stm][pos.pawn_key() & CORR_MASK];
-    score += non_pawn_corr[stm][WHITE][pos.non_pawn_key(WHITE) & CORR_MASK];
-    score += non_pawn_corr[stm][BLACK][pos.non_pawn_key(BLACK) & CORR_MASK];
+    score += search_state.pawn_corr[stm][pos.pawn_key() & CORR_MASK];
+    score += search_state.non_pawn_corr[stm][WHITE][pos.non_pawn_key(WHITE) & CORR_MASK];
+    score += search_state.non_pawn_corr[stm][BLACK][pos.non_pawn_key(BLACK) & CORR_MASK];
 
     if (ply >= 1 && ss[ply - 1].current_move != 0) {
         Piece prev_piece = ss[ply - 1].moved_piece;
         Square prev_to = to_sq(ss[ply - 1].current_move);
-        score += cont_corr[prev_piece][prev_to];
+        score += search_state.cont_corr[prev_piece][prev_to];
     }
 
     return score / 128;
@@ -223,14 +172,14 @@ static void update_eval_correction(const Position& pos, const SearchStack* ss, i
         entry = std::clamp(entry, -CORR_HISTORY_LIMIT, CORR_HISTORY_LIMIT);
         };
 
-    update_weight(pawn_corr[stm][pos.pawn_key() & CORR_MASK], bonus);
-    update_weight(non_pawn_corr[stm][WHITE][pos.non_pawn_key(WHITE) & CORR_MASK], bonus);
-    update_weight(non_pawn_corr[stm][BLACK][pos.non_pawn_key(BLACK) & CORR_MASK], bonus);
+    update_weight(search_state.pawn_corr[stm][pos.pawn_key() & CORR_MASK], bonus);
+    update_weight(search_state.non_pawn_corr[stm][WHITE][pos.non_pawn_key(WHITE) & CORR_MASK], bonus);
+    update_weight(search_state.non_pawn_corr[stm][BLACK][pos.non_pawn_key(BLACK) & CORR_MASK], bonus);
 
     if (ply >= 1 && ss[ply - 1].current_move != 0) {
         Piece prev_piece = ss[ply - 1].moved_piece;
         Square prev_to = to_sq(ss[ply - 1].current_move);
-        update_weight(cont_corr[prev_piece][prev_to], bonus);
+        update_weight(search_state.cont_corr[prev_piece][prev_to], bonus);
     }
 }
 
@@ -238,19 +187,19 @@ static void update_hard_time()
 {
     if (search_stop_requested()) return;
 
-    if (!target_nodes_soft && target_max_nodes > 0 && nodes_count >= target_max_nodes) {
-        stop_flag = true;
+    if (!search_state.target_nodes_soft && search_state.target_max_nodes > 0 && search_state.nodes_count >= search_state.target_max_nodes) {
+        search_state.stop_flag = true;
         return;
     }
 
     if (tm.hard_stop())
-        stop_flag = true;
+        search_state.stop_flag = true;
 }
 
 void stop_search_now()
 {
     global_stop_epoch.fetch_add(1, std::memory_order_seq_cst);
-    stop_flag = true;
+    search_state.stop_flag = true;
 }
 
 uint64_t current_stop_epoch()
@@ -260,28 +209,28 @@ uint64_t current_stop_epoch()
 
 void clear_search_state_for_new_game()
 {
-    stop_flag = false;
-    nodes_count = 0;
-    target_max_nodes = 0;
-    target_nodes_soft = false;
-    seldepth = 0;
-    nmp_min_ply = 0;
+    search_state.stop_flag = false;
+    search_state.nodes_count = 0;
+    search_state.target_max_nodes = 0;
+    search_state.target_nodes_soft = false;
+    search_state.seldepth = 0;
+    search_state.nmp_min_ply = 0;
 
-    std::fill(&killer_moves[0][0], &killer_moves[0][0] + 2 * MAX_PLY, Move(0));
-    std::fill(&history_heuristic[0][0], &history_heuristic[0][0] + 64 * 64, 0);
-    std::fill(&countermove[0][0], &countermove[0][0] + 64 * 64, Move(0));
+    std::fill(&search_state.killer_moves[0][0], &search_state.killer_moves[0][0] + 2 * MAX_PLY, Move(0));
+    std::fill(&search_state.history_heuristic[0][0], &search_state.history_heuristic[0][0] + 64 * 64, 0);
+    std::fill(&search_state.countermove[0][0], &search_state.countermove[0][0] + 64 * 64, Move(0));
 
-    std::fill(&cont_history[0][0][0][0],
-        &cont_history[0][0][0][0] + PIECE_NB * 64 * PIECE_NB * 64, 0);
+    std::fill(&search_state.cont_history[0][0][0][0],
+        &search_state.cont_history[0][0][0][0] + PIECE_NB * 64 * PIECE_NB * 64, 0);
 
-    std::fill(&capture_history[0][0][0], &capture_history[0][0][0] + 16 * 64 * 16, 0);
+    std::fill(&search_state.capture_history[0][0][0], &search_state.capture_history[0][0][0] + 16 * 64 * 16, 0);
 
-    std::fill(&pv_table[0][0], &pv_table[0][0] + MAX_PLY * MAX_PLY, Move(0));
-    std::fill(pv_length, pv_length + MAX_PLY, 0);
+    std::fill(&search_state.pv_table[0][0], &search_state.pv_table[0][0] + MAX_PLY * MAX_PLY, Move(0));
+    std::fill(search_state.pv_length, search_state.pv_length + MAX_PLY, 0);
 
-    std::fill(&pawn_corr[0][0], &pawn_corr[0][0] + 2 * CORR_SIZE, 0);
-    std::fill(&non_pawn_corr[0][0][0], &non_pawn_corr[0][0][0] + 4 * CORR_SIZE, 0);
-    std::fill(&cont_corr[0][0], &cont_corr[0][0] + PIECE_NB * 64, 0);
+    std::fill(&search_state.pawn_corr[0][0], &search_state.pawn_corr[0][0] + 2 * CORR_SIZE, 0);
+    std::fill(&search_state.non_pawn_corr[0][0][0], &search_state.non_pawn_corr[0][0][0] + 4 * CORR_SIZE, 0);
+    std::fill(&search_state.cont_corr[0][0], &search_state.cont_corr[0][0] + PIECE_NB * 64, 0);
 
     tm.reset();
 }
@@ -335,7 +284,7 @@ static inline int capture_history_score(const Position& pos, Move m)
     if (attacker == NO_PIECE)
         return 0;
 
-    return capture_history[attacker][to_sq(m)][victim];
+    return search_state.capture_history[attacker][to_sq(m)][victim];
 }
 
 static inline void update_capture_history(Piece attacker, Square to, Piece victim, int delta)
@@ -343,7 +292,7 @@ static inline void update_capture_history(Piece attacker, Square to, Piece victi
     if (attacker == NO_PIECE)
         return;
 
-    update_history_gravity(capture_history[attacker][to][victim], delta);
+    update_history_gravity(search_state.capture_history[attacker][to][victim], delta);
 }
 
 static inline bool valid_history_piece(Piece pc)
@@ -356,7 +305,7 @@ static inline int continuation_entry_score(const SearchStack& prev, Piece curPie
     if (!prev.current_move || !valid_history_piece(prev.moved_piece) || !valid_history_piece(curPiece))
         return 0;
 
-    return cont_history[prev.moved_piece][to_sq(prev.current_move)][curPiece][curTo] * weight / 128;
+    return search_state.cont_history[prev.moved_piece][to_sq(prev.current_move)][curPiece][curTo] * weight / 128;
 }
 
 static inline int continuation_history_score(const SearchStack* ss, int ply, Piece curPiece, Square curTo)
@@ -378,7 +327,7 @@ static inline void update_continuation_entry(const SearchStack& prev, Piece curP
     if (!prev.current_move || !valid_history_piece(prev.moved_piece) || !valid_history_piece(curPiece))
         return;
 
-    update_history_with_base(cont_history[prev.moved_piece][to_sq(prev.current_move)][curPiece][curTo], bonus, base);
+    update_history_with_base(search_state.cont_history[prev.moved_piece][to_sq(prev.current_move)][curPiece][curTo], bonus, base);
 }
 
 static inline void update_continuation_histories(const SearchStack* ss, int ply, Move m, Piece movedPiece, int delta)
@@ -445,28 +394,28 @@ static bool is_immediate_draw(Position& pos, int ply, bool in_check_now)
 static MovePicker::MainOrderData build_main_order_data(const SearchStack* ss, int ply)
 {
     MovePicker::MainOrderData data{};
-    data.history = history_heuristic;
-    data.capture_history = capture_history;
+    data.history = search_state.history_heuristic;
+    data.capture_history = search_state.capture_history;
     if (!ss || ply < 1)
         return data;
 
     const SearchStack& prev1 = ss[ply - 1];
     if (prev1.current_move && prev1.moved_piece != NO_PIECE)
-        data.cont1 = cont_history[prev1.moved_piece][to_sq(prev1.current_move)];
+        data.cont1 = search_state.cont_history[prev1.moved_piece][to_sq(prev1.current_move)];
 
     if (ply < 2)
         return data;
 
     const SearchStack& prev2 = ss[ply - 2];
     if (prev2.current_move && prev2.moved_piece != NO_PIECE)
-        data.cont2 = cont_history[prev2.moved_piece][to_sq(prev2.current_move)];
+        data.cont2 = search_state.cont_history[prev2.moved_piece][to_sq(prev2.current_move)];
 
     if (ply < 4)
         return data;
 
     const SearchStack& prev4 = ss[ply - 4];
     if (prev4.current_move && prev4.moved_piece != NO_PIECE)
-        data.cont4 = cont_history[prev4.moved_piece][to_sq(prev4.current_move)];
+        data.cont4 = search_state.cont_history[prev4.moved_piece][to_sq(prev4.current_move)];
 
 
     return data;
@@ -530,40 +479,15 @@ static inline void seed_root_accumulator(const Position& pos, SearchStack* ss)
     ss[0].acc_valid = true;
 }
 
-struct RootMove {
-    Move move = 0;
-    int score = -INF;
-    int window_score = -INF;
-    int previous_score = -INF;
-    int uci_score = -INF;
-    bool lowerbound = false;
-    bool upperbound = false;
-    int seldepth = 0;
-    uint64_t nodes = 0;
-    Move pv[MAX_PLY]{};
-    int pv_length = 0;
-};
-
-struct RootSearchContext {
-    RootMove* root_moves = nullptr;
-    int root_count = 0;
-    int root_depth = 0;
-    Move best_move = 0;
-    int best_score = -INF;
-    uint64_t best_move_nodes = 0;
-};
-
-static thread_local RootSearchContext* active_root_context = nullptr;
-
 static void set_root_pv(RootMove& root_move, Move move, int child_ply)
 {
     root_move.pv[0] = move;
-    int child_len = pv_length[child_ply];
+    int child_len = search_state.pv_length[child_ply];
     if (child_len < 0 || child_len > MAX_PLY - 1)
         child_len = 0;
 
     for (int i = 0; i < child_len; ++i)
-        root_move.pv[i + 1] = pv_table[child_ply][i];
+        root_move.pv[i + 1] = search_state.pv_table[child_ply][i];
 
     root_move.pv_length = child_len + 1;
 }
@@ -572,8 +496,8 @@ static void copy_root_pv_to_main(const RootMove& root_move)
 {
     const int len = std::clamp(root_move.pv_length, 0, MAX_PLY);
     for (int i = 0; i < len; ++i)
-        pv_table[0][i] = root_move.pv[i];
-    pv_length[0] = len;
+        search_state.pv_table[0][i] = root_move.pv[i];
+    search_state.pv_length[0] = len;
 }
 
 static bool root_move_less(const RootMove& a, const RootMove& b)
@@ -594,11 +518,11 @@ static int find_root_move_index(const RootSearchContext& root_context, Move move
 
 static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
 {
-    if (ply > seldepth) seldepth = ply;
-    nodes_count++;
+    if (ply > search_state.seldepth) search_state.seldepth = ply;
+    search_state.nodes_count++;
 
-    const uint64_t pollMaskQ = tm.poll_interval_mask();
-    if ((nodes_count & pollMaskQ) == 0)
+    const uint64_t pollMaskQ = SEARCH_POLL_MASK;
+    if ((search_state.nodes_count & pollMaskQ) == 0)
         update_hard_time();
 
     if (search_stop_requested())
@@ -612,7 +536,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         return inChk ? draw_score() : eval_from_stack(pos, ss, ply);
 
 
-    pv_length[ply] = 0;
+    search_state.pv_length[ply] = 0;
     int original_alpha = alpha;
     Move best_move = 0;
 
@@ -693,7 +617,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         legal_moves++;
 
 
-        pv_length[ply + 1] = 0;
+        search_state.pv_length[ply + 1] = 0;
 
         int score = -qsearch(pos, -beta, -alpha, ply + 1, ss);
         pos.undo_move();
@@ -712,12 +636,12 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
             best_move = m;
 
 
-            pv_table[ply][0] = m;
-            int child_len = pv_length[ply + 1];
+            search_state.pv_table[ply][0] = m;
+            int child_len = search_state.pv_length[ply + 1];
             if (child_len < 0 || child_len > MAX_PLY - ply - 1) child_len = 0;
             for (int j = 0; j < child_len; ++j)
-                pv_table[ply][j + 1] = pv_table[ply + 1][j];
-            pv_length[ply] = child_len + 1;
+                search_state.pv_table[ply][j + 1] = search_state.pv_table[ply + 1][j];
+            search_state.pv_length[ply] = child_len + 1;
         }
 
 
@@ -743,15 +667,15 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     constexpr bool isPV = (NT == Root || NT == PV);
     constexpr bool isRoot = (NT == Root);
 
-    if (ply > seldepth) seldepth = ply;
+    if (ply > search_state.seldepth) search_state.seldepth = ply;
 
     if (search_stop_requested()) return alpha;
     bool inChk = in_check(pos, pos.side_to_move());
     if (ply >= MAX_PLY - 1) return inChk ? draw_score() : eval_from_stack(pos, ss, ply);
-    nodes_count++;
+    search_state.nodes_count++;
 
-    const uint64_t pollMaskN = tm.poll_interval_mask();
-    if ((nodes_count & pollMaskN) == 0)
+    const uint64_t pollMaskN = SEARCH_POLL_MASK;
+    if ((search_state.nodes_count & pollMaskN) == 0)
         update_hard_time();
 
     if (is_immediate_draw(pos, ply, inChk))
@@ -763,7 +687,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     beta = std::min(beta, MATE_SCORE - ply - 1);
     if (alpha >= beta) return alpha;
 
-    pv_length[ply] = 0;
+    search_state.pv_length[ply] = 0;
 
     uint64_t key = pos.hash();
     int      original_alpha = alpha;
@@ -781,11 +705,11 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     int tt_score = tt_hit ? score_from_tt(tt_raw_score, ply, pos.halfmove_clock()) : 0;
 
     if constexpr (isRoot) {
-        if (active_root_context
-            && active_root_context->root_depth > 1
-            && active_root_context->root_count > 0
-            && active_root_context->root_moves[0].pv_length > 0)
-            tt_move = active_root_context->root_moves[0].pv[0];
+        if (search_state.active_root_context
+            && search_state.active_root_context->root_depth > 1
+            && search_state.active_root_context->root_count > 0
+            && search_state.active_root_context->root_moves[0].pv_length > 0)
+            tt_move = search_state.active_root_context->root_moves[0].pv[0];
     }
 
     if (!isPV && tt_hit && tt_depth >= depth && ss[ply].excluded_move == 0)
@@ -854,7 +778,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         // NMP
         bool prev_is_null = (ply > 0 && ss[ply - 1].current_move == 0);
 
-        if (cutNode && allow_nmp && !inChk && !prev_is_null && ss[ply].excluded_move == 0 && depth >= 4 && ply >= nmp_min_ply && staticEval >= beta && staticEval < 10000 && has_non_pawn_material(pos, pos.side_to_move()))
+        if (cutNode && allow_nmp && !inChk && !prev_is_null && ss[ply].excluded_move == 0 && depth >= 4 && ply >= search_state.nmp_min_ply && staticEval >= beta && staticEval < 10000 && has_non_pawn_material(pos, pos.side_to_move()))
         {
             int R = 3 + depth / 3 + std::min(2, (staticEval - beta) / 200);
             R = std::min(R, depth);
@@ -872,12 +796,12 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
             if (null_score >= beta)
             {
-                if (depth >= 16 && nmp_min_ply == 0) {
-                    const int previous_nmp_min_ply = nmp_min_ply;
-                    nmp_min_ply = ply + 3 * (depth - R) / 4;
+                if (depth >= 16 && search_state.nmp_min_ply == 0) {
+                    const int previous_nmp_min_ply = search_state.nmp_min_ply;
+                    search_state.nmp_min_ply = ply + 3 * (depth - R) / 4;
 
                     int verified_score = negamax<NonPV>(pos, depth - R, beta - 1, beta, ply, ss, false, false);
-                    nmp_min_ply = previous_nmp_min_ply;
+                    search_state.nmp_min_ply = previous_nmp_min_ply;
 
                     if (search_stop_requested())
                         return alpha;
@@ -952,7 +876,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     {
         const Move prev = ss[ply - 1].current_move;
         if (prev)
-            counter_move = countermove[from_sq(prev)][to_sq(prev)];
+            counter_move = search_state.countermove[from_sq(prev)][to_sq(prev)];
     }
 
 
@@ -960,8 +884,8 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     MovePicker picker;
     picker.init_main(pos,
         tt_move,
-        killer_moves[0][ply],
-        killer_moves[1][ply],
+        search_state.killer_moves[0][ply],
+        search_state.killer_moves[1][ply],
         counter_move,
         &orderData);
 
@@ -988,7 +912,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     while (true)
     {
         if constexpr (isRoot) {
-            if (!active_root_context)
+            if (!search_state.active_root_context)
                 break;
         }
 
@@ -999,7 +923,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         int root_state_index = -1;
 
         if constexpr (isRoot) {
-            root_state_index = find_root_move_index(*active_root_context, m);
+            root_state_index = find_root_move_index(*search_state.active_root_context, m);
             if (root_state_index < 0)
                 continue;
         }
@@ -1019,7 +943,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         int hist_score = 0;
         if (isQuiet) {
             const Square to = to_sq(m);
-            hist_score = history_heuristic[from_sq(m)][to]
+            hist_score = search_state.history_heuristic[from_sq(m)][to]
                 + continuation_history_score(ss, ply, movedPiece, to);
         }
         else {
@@ -1039,7 +963,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         if constexpr (!isPV) {
             if (!inChk && isQuiet && depth <= 8 && std::abs(alpha) < MATE_SCORE - MAX_PLY) {
                 int fp_margin = 120 * depth;
-                if (m != killer_moves[0][ply] && m != killer_moves[1][ply] && hist_score < 4000) {
+                if (m != search_state.killer_moves[0][ply] && m != search_state.killer_moves[1][ply] && hist_score < 4000) {
                     const int futility_score = staticEval + fp_margin;
                     if (futility_score <= alpha) {
                         best_score = std::max(best_score, futility_score);
@@ -1134,15 +1058,15 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         int  score;
 
         int searchedDepth = std::min(MAX_PLY - 1, depth - 1 + ext);
-        const uint64_t root_move_nodes_before = isRoot ? nodes_count : 0;
+        const uint64_t root_move_nodes_before = isRoot ? search_state.nodes_count : 0;
 
         if (moveCount == 1) {
-            pv_length[ply + 1] = 0;
+            search_state.pv_length[ply + 1] = 0;
             score = -negamax<isPV ? PV : NonPV>(
                 pos, searchedDepth, -beta, -alpha, ply + 1, ss, true, isPV ? false : !cutNode);
         }
         else {
-            pv_length[ply + 1] = 0;
+            search_state.pv_length[ply + 1] = 0;
 
             int R = 0;
 
@@ -1175,13 +1099,13 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                     R_scaled -= std::clamp(hist_modifier, -3 * LMR_SCALE, 3 * LMR_SCALE);
 
 
-                    if (m == killer_moves[0][ply] || m == killer_moves[1][ply]) {
+                    if (m == search_state.killer_moves[0][ply] || m == search_state.killer_moves[1][ply]) {
                         R_scaled -= 1 * LMR_SCALE;
                     }
 
                     if (ply >= 1 && ss[ply - 1].current_move != 0) {
                         Move prev = ss[ply - 1].current_move;
-                        if (m == countermove[from_sq(prev)][to_sq(prev)]) {
+                        if (m == search_state.countermove[from_sq(prev)][to_sq(prev)]) {
                             R_scaled -= 1 * LMR_SCALE;
                         }
                     }
@@ -1228,7 +1152,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
             if constexpr (isPV) {
                 if (score > alpha && score < beta) {
-                    pv_length[ply + 1] = 0;
+                    search_state.pv_length[ply + 1] = 0;
                     score = -negamax<PV>(pos, searchedDepth, -beta, -alpha, ply + 1, ss, true, false);
                 }
             }
@@ -1237,9 +1161,9 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         pos.undo_move();
 
         if constexpr (isRoot) {
-            if (active_root_context && root_state_index >= 0) {
-                const uint64_t move_nodes = nodes_count - root_move_nodes_before;
-                RootMove& root_move = active_root_context->root_moves[root_state_index];
+            if (search_state.active_root_context && root_state_index >= 0) {
+                const uint64_t move_nodes = search_state.nodes_count - root_move_nodes_before;
+                RootMove& root_move = search_state.active_root_context->root_moves[root_state_index];
                 root_move.window_score = score;
                 root_move.nodes += move_nodes;
 
@@ -1258,17 +1182,17 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                         root_move.lowerbound = true;
                     }
 
-                    root_move.seldepth = seldepth;
+                    root_move.seldepth = search_state.seldepth;
                     set_root_pv(root_move, m, ply + 1);
                 }
                 else {
                     root_move.score = -INF;
                 }
 
-                if (!search_stop_requested() && score > active_root_context->best_score) {
-                    active_root_context->best_score = score;
-                    active_root_context->best_move = m;
-                    active_root_context->best_move_nodes = root_move.nodes;
+                if (!search_stop_requested() && score > search_state.active_root_context->best_score) {
+                    search_state.active_root_context->best_score = score;
+                    search_state.active_root_context->best_move = m;
+                    search_state.active_root_context->best_move_nodes = root_move.nodes;
                 }
             }
         }
@@ -1288,16 +1212,16 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
                 if (isQuiet)
                 {
-                    killer_moves[1][ply] = killer_moves[0][ply];
-                    killer_moves[0][ply] = m;
+                    search_state.killer_moves[1][ply] = search_state.killer_moves[0][ply];
+                    search_state.killer_moves[0][ply] = m;
 
-                    update_history_gravity(history_heuristic[from_sq(m)][to_sq(m)], bonus);
+                    update_history_gravity(search_state.history_heuristic[from_sq(m)][to_sq(m)], bonus);
 
                     if (ply >= 1)
                     {
                         Move prev = ss[ply - 1].current_move;
                         if (prev)
-                            countermove[from_sq(prev)][to_sq(prev)] = m;
+                            search_state.countermove[from_sq(prev)][to_sq(prev)] = m;
                     }
 
                     update_continuation_histories(ss, ply, m, movedPiece, bonus);
@@ -1308,7 +1232,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                         Piece qp = quiet_pieces[i];
                         if (!qm || qm == m || qp == NO_PIECE) continue;
 
-                        update_history_gravity(history_heuristic[from_sq(qm)][to_sq(qm)], -malus);
+                        update_history_gravity(search_state.history_heuristic[from_sq(qm)][to_sq(qm)], -malus);
                         update_continuation_histories(ss, ply, qm, qp, -malus);
                     }
 
@@ -1365,12 +1289,12 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             alpha = score;
             best_move = m;
 
-            pv_table[ply][0] = m;
-            int child_len = pv_length[ply + 1];
+            search_state.pv_table[ply][0] = m;
+            int child_len = search_state.pv_length[ply + 1];
             if (child_len < 0 || child_len > MAX_PLY - ply - 1) child_len = 0;
             for (int j = 0; j < child_len; ++j)
-                pv_table[ply][j + 1] = pv_table[ply + 1][j];
-            pv_length[ply] = child_len + 1;
+                search_state.pv_table[ply][j + 1] = search_state.pv_table[ply + 1][j];
+            search_state.pv_length[ply] = child_len + 1;
         }
 
         if constexpr (isRoot) {
@@ -1391,11 +1315,11 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         return inChk ? -MATE_SCORE + ply : 0;
     }
 
-    const bool root_has_best = isRoot && active_root_context && active_root_context->best_move != 0;
-    const int node_score = root_has_best ? active_root_context->best_score
+    const bool root_has_best = isRoot && search_state.active_root_context && search_state.active_root_context->best_move != 0;
+    const int node_score = root_has_best ? search_state.active_root_context->best_score
         : (best_score != -INF ? best_score : alpha);
     if (root_has_best && best_move == 0)
-        best_move = active_root_context->best_move;
+        best_move = search_state.active_root_context->best_move;
 
     if (!search_stop_requested() && best_move != 0)
     {
@@ -1417,7 +1341,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             const bool isBest = (best_is_quiet && qm == best_move);
             const int delta = isBest ? bonus : -malus;
 
-            update_history_gravity(history_heuristic[from_sq(qm)][to_sq(qm)], delta);
+            update_history_gravity(search_state.history_heuristic[from_sq(qm)][to_sq(qm)], delta);
 
             update_continuation_histories(ss, ply, qm, qp, delta);
 
@@ -1425,7 +1349,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             {
                 Move prev = ss[ply - 1].current_move;
                 if (prev)
-                    countermove[from_sq(prev)][to_sq(prev)] = qm;
+                    search_state.countermove[from_sq(prev)][to_sq(prev)] = qm;
             }
         }
 
@@ -1529,10 +1453,10 @@ static void print_search_info(Position& pos, int depth, int best_score)
 
     int time_spent = tm.elapsed();
     uint64_t nps = (time_spent > 0)
-        ? (nodes_count * 1000ULL / time_spent)
+        ? (search_state.nodes_count * 1000ULL / time_spent)
         : 0;
 
-    std::cout << "info depth " << depth << " seldepth " << seldepth;
+    std::cout << "info depth " << depth << " seldepth " << search_state.seldepth;
 
     if (best_score > MATE_SCORE - 1000)
     {
@@ -1561,16 +1485,16 @@ static void print_search_info(Position& pos, int depth, int best_score)
         }
     }
 
-    std::cout << " nodes " << nodes_count
+    std::cout << " nodes " << search_state.nodes_count
         << " nps " << nps
         << " hashfull " << tt_hashfull()
         << " time " << time_spent
         << " pv ";
 
     int pv_made = 0;
-    for (int i = 0; i < pv_length[0]; ++i)
+    for (int i = 0; i < search_state.pv_length[0]; ++i)
     {
-        Move mv = pv_table[0][i];
+        Move mv = search_state.pv_table[0][i];
         if (!pos.make_move(mv))
             break;
         ++pv_made;
@@ -1606,26 +1530,26 @@ SearchResult search(Position& pos,
     bool soft_node_limit,
     uint64_t stop_epoch_baseline)
 {
-    local_stop_epoch = stop_epoch_baseline == UINT64_MAX
+    search_state.local_stop_epoch = stop_epoch_baseline == UINT64_MAX
         ? global_stop_epoch.load(std::memory_order_relaxed)
         : stop_epoch_baseline;
-    stop_flag = false;
-    nodes_count = 0;
-    target_max_nodes = max_nodes;
-    target_nodes_soft = soft_node_limit;
-    seldepth = 0;
-    nmp_min_ply = 0;
+    search_state.stop_flag = false;
+    search_state.nodes_count = 0;
+    search_state.target_max_nodes = max_nodes;
+    search_state.target_nodes_soft = soft_node_limit;
+    search_state.seldepth = 0;
+    search_state.nmp_min_ply = 0;
 
     std::unique_ptr<SearchStack[]> ss_storage = std::make_unique<SearchStack[]>(MAX_PLY + 4);
     SearchStack* ss = ss_storage.get();
     initialize_search_stack(ss);
     seed_root_accumulator(pos, ss);
 
-    for (int i = 0; i < MAX_PLY; ++i) pv_length[i] = 0;
+    for (int i = 0; i < MAX_PLY; ++i) search_state.pv_length[i] = 0;
     for (int i = 0; i < MAX_PLY; ++i)
     {
-        killer_moves[0][i] = 0;
-        killer_moves[1][i] = 0;
+        search_state.killer_moves[0][i] = 0;
+        search_state.killer_moves[1][i] = 0;
     }
 
     tm.reset();
@@ -1669,7 +1593,7 @@ SearchResult search(Position& pos,
         result.best_move = 0;
         result.score = in_check(pos, pos.side_to_move()) ? -MATE_SCORE : 0;
         result.depth = 0;
-        result.nodes = nodes_count;
+        result.nodes = search_state.nodes_count;
         return result;
     }
 
@@ -1680,7 +1604,7 @@ SearchResult search(Position& pos,
         result.best_move = root_moves[0].move;
         result.score = draw_score();
         result.depth = 0;
-        result.nodes = nodes_count;
+        result.nodes = search_state.nodes_count;
         return result;
     }
 
@@ -1688,7 +1612,7 @@ SearchResult search(Position& pos,
 
     for (int depth = 1; depth <= max_depth; ++depth)
     {
-        seldepth = 0;
+        search_state.seldepth = 0;
 
 
         update_hard_time();
@@ -1713,17 +1637,17 @@ SearchResult search(Position& pos,
         int aspiration_reduction = 0;
 
         while (true) {
-            pv_length[0] = 0;
+            search_state.pv_length[0] = 0;
 
             RootSearchContext root_context{};
             root_context.root_moves = root_moves;
             root_context.root_count = root_count;
             root_context.root_depth = depth;
 
-            active_root_context = &root_context;
+            search_state.active_root_context = &root_context;
             const int adjusted_depth = std::max(1, depth - aspiration_reduction);
             const int root_score = negamax<Root>(pos, adjusted_depth, alpha, beta, 0, ss);
-            active_root_context = nullptr;
+            search_state.active_root_context = nullptr;
 
             if (search_stop_requested()) break;
 
@@ -1758,14 +1682,14 @@ SearchResult search(Position& pos,
             result.best_move = current_depth_best_move;
             result.score = best_score;
             result.depth = depth;
-            result.nodes = nodes_count;
+            result.nodes = search_state.nodes_count;
 
             if (!infinite && movetime <= 0 && time_left > 0)
                 tm.update_after_iteration(depth,
                     current_depth_best_move,
                     best_score,
                     current_depth_best_move_nodes,
-                    nodes_count,
+                    search_state.nodes_count,
                     root_count);
         }
 
@@ -1778,7 +1702,7 @@ SearchResult search(Position& pos,
         if (best_score >= MATE_SCORE - 4 || best_score <= -MATE_SCORE + 4)
             break;
 
-        if (target_max_nodes > 0 && nodes_count >= target_max_nodes) {
+        if (search_state.target_max_nodes > 0 && search_state.nodes_count >= search_state.target_max_nodes) {
             break;
         }
 
