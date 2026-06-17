@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <new>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -21,11 +22,25 @@ namespace {
         TTEntry e[TT_WAYS];
     };
 
+}
+
+struct TTContext {
+    std::vector<TTBucket> table;
+    uint64_t mask = 0;
+    uint8_t gen = 1;
+    int hash_mb = 0;
+};
+
+namespace {
+
     static std::atomic<int> g_configured_hash_mb{ DEFAULT_HASH_MB };
-    static thread_local std::vector<TTBucket> table;
-    static thread_local uint64_t g_mask = 0;
-    static thread_local uint8_t g_gen = 1;
-    static thread_local int g_hash_mb = 0;
+    static TTContext global_context;
+    static thread_local TTContext* active_context = nullptr;
+
+    static inline TTContext& current_context()
+    {
+        return active_context ? *active_context : global_context;
+    }
 
 
     static inline int bound_bonus(TTFlag flag) {
@@ -34,8 +49,8 @@ namespace {
         return 0;
     }
 
-    static inline int entry_score(const TTEntry& e) {
-        const int age = (int(g_gen) - int(e.gen)) & 0xFF;
+    static inline int entry_score(const TTContext& ctx, const TTEntry& e) {
+        const int age = (int(ctx.gen) - int(e.gen)) & 0xFF;
         return e.depth * 8 + bound_bonus(e.flag) - age * 4;
     }
 
@@ -66,8 +81,8 @@ namespace {
         return std::max(1, std::min(mb, MAX_HASH_MB));
     }
 
-    static void clear_table_contents() {
-        for (TTBucket& b : table) {
+    static void clear_table_contents(TTContext& ctx) {
+        for (TTBucket& b : ctx.table) {
             for (int w = 0; w < TT_WAYS; ++w) {
                 b.e[w].key = 0;
                 b.e[w].depth = 0;
@@ -80,7 +95,7 @@ namespace {
         }
     }
 
-    static bool resize_local_table(int mb) {
+    static bool resize_context(TTContext& ctx, int mb) {
         const int clampedMb = clamp_hash_mb(mb);
         const size_t buckets = buckets_for_mb(clampedMb);
 
@@ -88,12 +103,12 @@ namespace {
             std::vector<TTBucket> newTable;
             newTable.resize(buckets);
 
-            table.swap(newTable);
-            g_mask = uint64_t(buckets - 1);
-            g_hash_mb = clampedMb;
-            g_gen = 1;
+            ctx.table.swap(newTable);
+            ctx.mask = uint64_t(buckets - 1);
+            ctx.hash_mb = clampedMb;
+            ctx.gen = 1;
 
-            clear_table_contents();
+            clear_table_contents(ctx);
             return true;
         }
         catch (...) {
@@ -101,21 +116,39 @@ namespace {
         }
     }
 
-    static void ensure_table() {
+    static void ensure_global_table() {
         const int configuredMb = clamp_hash_mb(g_configured_hash_mb.load(std::memory_order_relaxed));
-        if (!table.empty() && g_hash_mb == configuredMb)
+        if (!global_context.table.empty() && global_context.hash_mb == configuredMb)
             return;
 
-        if (!resize_local_table(configuredMb)) {
-            table.resize(1);
-            g_mask = 0;
-            g_hash_mb = 1;
-            g_gen = 1;
-            clear_table_contents();
+        if (!resize_context(global_context, configuredMb)) {
+            global_context.table.resize(1);
+            global_context.mask = 0;
+            global_context.hash_mb = 1;
+            global_context.gen = 1;
+            clear_table_contents(global_context);
         }
     }
 
-    static inline TTEntry* pick_replacement(TTBucket& b, uint64_t key) {
+    static void ensure_context(TTContext& ctx) {
+        if (&ctx == &global_context) {
+            ensure_global_table();
+            return;
+        }
+
+        if (!ctx.table.empty())
+            return;
+
+        if (!resize_context(ctx, ctx.hash_mb > 0 ? ctx.hash_mb : DEFAULT_HASH_MB)) {
+            ctx.table.resize(1);
+            ctx.mask = 0;
+            ctx.hash_mb = 1;
+            ctx.gen = 1;
+            clear_table_contents(ctx);
+        }
+    }
+
+    static inline TTEntry* pick_replacement(TTContext& ctx, TTBucket& b, uint64_t key) {
         for (int w = 0; w < TT_WAYS; ++w)
             if (b.e[w].key == key)
                 return &b.e[w];
@@ -125,10 +158,10 @@ namespace {
                 return &b.e[w];
 
         TTEntry* worst = &b.e[0];
-        int worstScore = entry_score(*worst);
+        int worstScore = entry_score(ctx, *worst);
 
         for (int w = 1; w < TT_WAYS; ++w) {
-            const int s = entry_score(b.e[w]);
+            const int s = entry_score(ctx, b.e[w]);
             if (s < worstScore) {
                 worstScore = s;
                 worst = &b.e[w];
@@ -142,32 +175,45 @@ namespace {
 
 bool tt_resize_mb(int mb) {
     const int clampedMb = clamp_hash_mb(mb);
-    if (!resize_local_table(clampedMb))
+    TTContext& ctx = current_context();
+    if (!resize_context(ctx, clampedMb))
         return false;
 
-    g_configured_hash_mb.store(clampedMb, std::memory_order_relaxed);
+    if (&ctx == &global_context)
+        g_configured_hash_mb.store(clampedMb, std::memory_order_relaxed);
     return true;
 }
 
 int tt_hash_mb() {
+    TTContext& ctx = current_context();
+    if (&ctx != &global_context && ctx.hash_mb > 0)
+        return ctx.hash_mb;
+
     return clamp_hash_mb(g_configured_hash_mb.load(std::memory_order_relaxed));
 }
 
 void tt_new_search() {
-    ensure_table();
+    TTContext& ctx = current_context();
+    ensure_context(ctx);
 
-    g_gen = uint8_t(g_gen + 1);
-    if (g_gen == 0)
-        g_gen = 1;
+    ctx.gen = uint8_t(ctx.gen + 1);
+    if (ctx.gen == 0)
+        ctx.gen = 1;
 }
 
 void tt_clear() {
-    ensure_table();
-    clear_table_contents();
+    TTContext& ctx = current_context();
+    ensure_context(ctx);
+
+    clear_table_contents(ctx);
 }
 
 TTEntry* tt_probe(uint64_t key) {
-    TTBucket& b = table[size_t(key & g_mask)];
+    TTContext& ctx = current_context();
+    if (ctx.table.empty())
+        return nullptr;
+
+    TTBucket& b = ctx.table[size_t(key & ctx.mask)];
     for (int w = 0; w < TT_WAYS; ++w)
         if (b.e[w].key == key)
             return &b.e[w];
@@ -176,7 +222,11 @@ TTEntry* tt_probe(uint64_t key) {
 }
 
 void tt_prefetch(uint64_t key) {
-    const TTBucket& b = table[size_t(key & g_mask)];
+    TTContext& ctx = current_context();
+    if (ctx.table.empty())
+        return;
+
+    const TTBucket& b = ctx.table[size_t(key & ctx.mask)];
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     _mm_prefetch(reinterpret_cast<const char*>(&b), _MM_HINT_T0);
 #elif defined(__GNUC__) || defined(__clang__)
@@ -187,27 +237,37 @@ void tt_prefetch(uint64_t key) {
 }
 
 int tt_hashfull() {
-    ensure_table();
+    TTContext& ctx = current_context();
+    ensure_context(ctx);
 
-    const size_t buckets = std::min<size_t>(1024, table.size());
+    const size_t buckets = std::min<size_t>(1024, ctx.table.size());
     if (buckets == 0)
         return 0;
 
     int used = 0;
+    const uint8_t current_gen = ctx.gen;
     for (size_t i = 0; i < buckets; ++i)
+    {
         for (int w = 0; w < TT_WAYS; ++w)
-            if (table[i].e[w].key != 0 && table[i].e[w].gen == g_gen)
+            if (ctx.table[i].e[w].key != 0
+                && ctx.table[i].e[w].gen == current_gen)
                 ++used;
+    }
 
     return int((used * 1000ULL) / (buckets * TT_WAYS));
 }
 
 void tt_store(uint64_t key, int depth, int score, TTFlag flag, Move best_move, int static_eval) {
-    TTBucket& b = table[size_t(key & g_mask)];
-    TTEntry* e = pick_replacement(b, key);
+    TTContext& ctx = current_context();
+    if (ctx.table.empty())
+        return;
+
+    const uint8_t current_gen = ctx.gen;
+    TTBucket& b = ctx.table[size_t(key & ctx.mask)];
+    TTEntry* e = pick_replacement(ctx, b, key);
 
     if (e->key != key && e->key != 0) {
-        if (incoming_score(depth, flag) < entry_score(*e))
+        if (incoming_score(depth, flag) < entry_score(ctx, *e))
             return;
     }
 
@@ -216,16 +276,45 @@ void tt_store(uint64_t key, int depth, int score, TTFlag flag, Move best_move, i
             best_move = e->best_move;
 
         if (depth + 2 < e->depth && e->flag == TT_EXACT && flag != TT_EXACT) {
-            e->gen = g_gen;
+            e->gen = current_gen;
             return;
         }
     }
 
-    e->key = key;
     e->depth = depth;
     e->score = score;
     e->flag = flag;
     e->best_move = best_move;
     e->static_eval = static_eval;
-    e->gen = g_gen;
+    e->gen = current_gen;
+    e->key = key;
+}
+
+TTContext* tt_create_context(int mb)
+{
+    TTContext* context = new (std::nothrow) TTContext();
+    if (!context)
+        return nullptr;
+
+    if (!resize_context(*context, mb)) {
+        delete context;
+        return nullptr;
+    }
+
+    return context;
+}
+
+void tt_destroy_context(TTContext* context)
+{
+    delete context;
+}
+
+void tt_bind_context(TTContext* context)
+{
+    active_context = context;
+}
+
+TTContext* tt_current_context()
+{
+    return active_context;
 }

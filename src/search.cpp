@@ -66,6 +66,70 @@ static std::atomic<uint64_t> global_stop_epoch(0);
 static thread_local SearchThreadState search_state;
 static thread_local TimeManager tm;
 static thread_local std::unique_ptr<SearchMoveBuffer[]> search_move_buffers;
+static thread_local bool suppress_search_output = false;
+static thread_local std::atomic<uint64_t> fallback_search_node_counter{ 0 };
+static thread_local std::atomic<uint64_t>* search_node_counter = nullptr;
+static thread_local SearchNodeTotalFn total_search_nodes_fn = nullptr;
+static thread_local void* total_search_nodes_context = nullptr;
+
+static inline std::atomic<uint64_t>& active_node_counter()
+{
+    return search_node_counter ? *search_node_counter : fallback_search_node_counter;
+}
+
+static inline uint64_t current_search_nodes()
+{
+    return active_node_counter().load(std::memory_order_relaxed);
+}
+
+static inline uint64_t count_search_node()
+{
+    std::atomic<uint64_t>& nodes = active_node_counter();
+    const uint64_t next = nodes.load(std::memory_order_relaxed) + 1;
+    nodes.store(next, std::memory_order_relaxed);
+    return next;
+}
+
+static inline uint64_t reported_search_nodes()
+{
+    if (total_search_nodes_fn) {
+        const uint64_t total = total_search_nodes_fn(total_search_nodes_context);
+        if (total > 0)
+            return total;
+    }
+
+    return current_search_nodes();
+}
+
+struct SearchOutputScope {
+    SearchOutputScope(bool suppress,
+        std::atomic<uint64_t>* node_counter,
+        SearchNodeTotalFn total_nodes_fn,
+        void* total_nodes_context)
+        : previous(suppress_search_output)
+        , previous_node_counter(search_node_counter)
+        , previous_total_nodes_fn(total_search_nodes_fn)
+        , previous_total_nodes_context(total_search_nodes_context)
+    {
+        suppress_search_output = suppress;
+        search_node_counter = node_counter;
+        total_search_nodes_fn = total_nodes_fn;
+        total_search_nodes_context = total_nodes_context;
+    }
+
+    ~SearchOutputScope()
+    {
+        suppress_search_output = previous;
+        search_node_counter = previous_node_counter;
+        total_search_nodes_fn = previous_total_nodes_fn;
+        total_search_nodes_context = previous_total_nodes_context;
+    }
+
+    bool previous;
+    std::atomic<uint64_t>* previous_node_counter;
+    SearchNodeTotalFn previous_total_nodes_fn;
+    void* previous_total_nodes_context;
+};
 
 static inline bool external_stop_requested()
 {
@@ -79,7 +143,7 @@ static inline bool search_stop_requested()
 
 static inline int draw_score()
 {
-    return -1 + (search_state.nodes_count & 2);
+    return -1 + (current_search_nodes() & 2);
 }
 
 static inline int clamp_eval_score(int score)
@@ -187,7 +251,8 @@ static void update_hard_time()
 {
     if (search_stop_requested()) return;
 
-    if (!search_state.target_nodes_soft && search_state.target_max_nodes > 0 && search_state.nodes_count >= search_state.target_max_nodes) {
+    const uint64_t nodes = current_search_nodes();
+    if (!search_state.target_nodes_soft && search_state.target_max_nodes > 0 && nodes >= search_state.target_max_nodes) {
         search_state.stop_flag = true;
         return;
     }
@@ -210,7 +275,7 @@ uint64_t current_stop_epoch()
 void clear_search_state_for_new_game()
 {
     search_state.stop_flag = false;
-    search_state.nodes_count = 0;
+    active_node_counter().store(0, std::memory_order_relaxed);
     search_state.target_max_nodes = 0;
     search_state.target_nodes_soft = false;
     search_state.seldepth = 0;
@@ -519,10 +584,10 @@ static int find_root_move_index(const RootSearchContext& root_context, Move move
 static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
 {
     if (ply > search_state.seldepth) search_state.seldepth = ply;
-    search_state.nodes_count++;
+    const uint64_t nodes = count_search_node();
 
     const uint64_t pollMaskQ = SEARCH_POLL_MASK;
-    if ((search_state.nodes_count & pollMaskQ) == 0)
+    if ((nodes & pollMaskQ) == 0)
         update_hard_time();
 
     if (search_stop_requested())
@@ -544,18 +609,22 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     Move q_tt_move = 0;
     TTEntry* qtt = tt_probe(key);
     int q_tt_score = 0;
+    int q_tt_static_eval = 0;
+    TTFlag q_tt_flag = TT_ALPHA;
     bool has_q_tt_score = false;
     if (qtt) {
         q_tt_move = qtt->best_move;
         q_tt_score = score_from_tt(qtt->score, ply, pos.halfmove_clock());
+        q_tt_static_eval = qtt->static_eval;
+        q_tt_flag = qtt->flag;
         has_q_tt_score = true;
 
         if (pos.halfmove_clock() < 90) {
-            if (qtt->flag == TT_EXACT)
+            if (q_tt_flag == TT_EXACT)
                 return q_tt_score;
-            if (qtt->flag == TT_ALPHA && q_tt_score <= alpha)
+            if (q_tt_flag == TT_ALPHA && q_tt_score <= alpha)
                 return q_tt_score;
-            if (qtt->flag == TT_BETA && q_tt_score >= beta)
+            if (q_tt_flag == TT_BETA && q_tt_score >= beta)
                 return q_tt_score;
         }
     }
@@ -564,7 +633,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     int raw_eval = -INF;
     if (!inChk)
     {
-        raw_eval = qtt ? qtt->static_eval : eval_from_stack(pos, ss, ply);
+        raw_eval = qtt ? q_tt_static_eval : eval_from_stack(pos, ss, ply);
         stand_pat = scale_rule50_eval(raw_eval, pos) + get_eval_correction(pos, ss, ply);
 
         stand_pat = clamp_eval_score(stand_pat);
@@ -572,9 +641,9 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         ss[ply].static_eval = stand_pat;
 
         if (has_q_tt_score) {
-            if ((qtt->flag == TT_BETA && q_tt_score > stand_pat)
-                || (qtt->flag == TT_ALPHA && q_tt_score < stand_pat)
-                || qtt->flag == TT_EXACT)
+            if ((q_tt_flag == TT_BETA && q_tt_score > stand_pat)
+                || (q_tt_flag == TT_ALPHA && q_tt_score < stand_pat)
+                || q_tt_flag == TT_EXACT)
                 stand_pat = q_tt_score;
         }
 
@@ -672,10 +741,10 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     if (search_stop_requested()) return alpha;
     bool inChk = in_check(pos, pos.side_to_move());
     if (ply >= MAX_PLY - 1) return inChk ? draw_score() : eval_from_stack(pos, ss, ply);
-    search_state.nodes_count++;
+    const uint64_t nodes = count_search_node();
 
     const uint64_t pollMaskN = SEARCH_POLL_MASK;
-    if ((search_state.nodes_count & pollMaskN) == 0)
+    if ((nodes & pollMaskN) == 0)
         update_hard_time();
 
     if (is_immediate_draw(pos, ply, inChk))
@@ -1058,7 +1127,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         int  score;
 
         int searchedDepth = std::min(MAX_PLY - 1, depth - 1 + ext);
-        const uint64_t root_move_nodes_before = isRoot ? search_state.nodes_count : 0;
+        const uint64_t root_move_nodes_before = isRoot ? current_search_nodes() : 0;
 
         if (moveCount == 1) {
             search_state.pv_length[ply + 1] = 0;
@@ -1162,7 +1231,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
         if constexpr (isRoot) {
             if (search_state.active_root_context && root_state_index >= 0) {
-                const uint64_t move_nodes = search_state.nodes_count - root_move_nodes_before;
+                const uint64_t move_nodes = current_search_nodes() - root_move_nodes_before;
                 RootMove& root_move = search_state.active_root_context->root_moves[root_state_index];
                 root_move.window_score = score;
                 root_move.nodes += move_nodes;
@@ -1448,12 +1517,13 @@ static bool has_legal_move(Position& pos, Move excluded_move)
 
 static void print_search_info(Position& pos, int depth, int best_score)
 {
-    if (g_silent_search)
+    if (g_silent_search || suppress_search_output)
         return;
 
     int time_spent = tm.elapsed();
+    const uint64_t nodes = reported_search_nodes();
     uint64_t nps = (time_spent > 0)
-        ? (search_state.nodes_count * 1000ULL / time_spent)
+        ? (nodes * 1000ULL / time_spent)
         : 0;
 
     std::cout << "info depth " << depth << " seldepth " << search_state.seldepth;
@@ -1485,7 +1555,7 @@ static void print_search_info(Position& pos, int depth, int best_score)
         }
     }
 
-    std::cout << " nodes " << search_state.nodes_count
+    std::cout << " nodes " << nodes
         << " nps " << nps
         << " hashfull " << tt_hashfull()
         << " time " << time_spent
@@ -1528,13 +1598,23 @@ SearchResult search(Position& pos,
     uint64_t max_nodes,
     int move_overhead,
     bool soft_node_limit,
-    uint64_t stop_epoch_baseline)
+    uint64_t stop_epoch_baseline,
+    bool suppress_output,
+    bool update_tt_generation,
+    std::atomic<uint64_t>* node_counter,
+    SearchNodeTotalFn total_nodes_fn,
+    void* total_nodes_context)
 {
+    SearchOutputScope output_scope(suppress_output,
+        node_counter,
+        total_nodes_fn,
+        total_nodes_context);
+
     search_state.local_stop_epoch = stop_epoch_baseline == UINT64_MAX
         ? global_stop_epoch.load(std::memory_order_relaxed)
         : stop_epoch_baseline;
     search_state.stop_flag = false;
-    search_state.nodes_count = 0;
+    active_node_counter().store(0, std::memory_order_relaxed);
     search_state.target_max_nodes = max_nodes;
     search_state.target_nodes_soft = soft_node_limit;
     search_state.seldepth = 0;
@@ -1553,7 +1633,8 @@ SearchResult search(Position& pos,
     }
 
     tm.reset();
-    tt_new_search();
+    if (update_tt_generation)
+        tt_new_search();
 
     int current_game_ply = std::max(0, (pos.fullmove_number() - 1) * 2
         + (pos.side_to_move() == BLACK ? 1 : 0));
@@ -1593,7 +1674,7 @@ SearchResult search(Position& pos,
         result.best_move = 0;
         result.score = in_check(pos, pos.side_to_move()) ? -MATE_SCORE : 0;
         result.depth = 0;
-        result.nodes = search_state.nodes_count;
+        result.nodes = current_search_nodes();
         return result;
     }
 
@@ -1604,7 +1685,7 @@ SearchResult search(Position& pos,
         result.best_move = root_moves[0].move;
         result.score = draw_score();
         result.depth = 0;
-        result.nodes = search_state.nodes_count;
+        result.nodes = current_search_nodes();
         return result;
     }
 
@@ -1682,14 +1763,14 @@ SearchResult search(Position& pos,
             result.best_move = current_depth_best_move;
             result.score = best_score;
             result.depth = depth;
-            result.nodes = search_state.nodes_count;
+            result.nodes = current_search_nodes();
 
             if (!infinite && movetime <= 0 && time_left > 0)
                 tm.update_after_iteration(depth,
                     current_depth_best_move,
                     best_score,
                     current_depth_best_move_nodes,
-                    search_state.nodes_count,
+                    current_search_nodes(),
                     root_count);
         }
 
@@ -1702,7 +1783,7 @@ SearchResult search(Position& pos,
         if (best_score >= MATE_SCORE - 4 || best_score <= -MATE_SCORE + 4)
             break;
 
-        if (search_state.target_max_nodes > 0 && search_state.nodes_count >= search_state.target_max_nodes) {
+        if (search_state.target_max_nodes > 0 && current_search_nodes() >= search_state.target_max_nodes) {
             break;
         }
 

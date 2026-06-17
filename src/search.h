@@ -20,6 +20,8 @@ struct SearchResult
     uint64_t nodes;
 };
 
+using SearchNodeTotalFn = uint64_t(*)(void*);
+
 // Eval Correction Tables
 constexpr int CORR_SIZE = 16384;
 constexpr int CORR_MASK = CORR_SIZE - 1;
@@ -82,7 +84,6 @@ struct SearchThreadState {
 
     uint64_t local_stop_epoch = 0;
     bool stop_flag = false;
-    uint64_t nodes_count = 0;
     uint64_t target_max_nodes = 0;
     bool target_nodes_soft = false;
     int seldepth = 0;
@@ -110,4 +111,9 @@ SearchResult search(Position& pos,
     uint64_t max_nodes = 0,
     int move_overhead = 10,
     bool soft_node_limit = false,
-    uint64_t stop_epoch_baseline = UINT64_MAX);
+    uint64_t stop_epoch_baseline = UINT64_MAX,
+    bool suppress_output = false,
+    bool update_tt_generation = true,
+    std::atomic<uint64_t>* node_counter = nullptr,
+    SearchNodeTotalFn total_nodes_fn = nullptr,
+    void* total_nodes_context = nullptr);

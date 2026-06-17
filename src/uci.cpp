@@ -8,19 +8,17 @@
 #include "nnue.h"
 #include "wdl.h"
 #include "bench.h"
+#include "thread.h"
 
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <thread>
-#include <atomic>
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <iomanip>
-#include <limits>
-#include <condition_variable>
-#include <mutex>
+#include <memory>
 
 static const char* STARTPOS_FEN =
 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -29,32 +27,8 @@ static constexpr int DEFAULT_MOVE_OVERHEAD_MS = 10;
 static constexpr int MIN_MOVE_OVERHEAD_MS = 0;
 static constexpr int MAX_MOVE_OVERHEAD_MS = 5000;
 static int move_overhead_ms = DEFAULT_MOVE_OVERHEAD_MS;
-
-struct SearchJob {
-    Position pos;
-    int depth = 64;
-    int movetime = -1;
-    int time_left = 0;
-    int increment = 0;
-    int moves_to_go = 0;
-    bool infinite = false;
-    uint64_t nodes = 0;
-    int move_overhead = DEFAULT_MOVE_OVERHEAD_MS;
-    uint64_t stop_epoch_baseline = std::numeric_limits<uint64_t>::max();
-};
-
-static std::thread search_thread;
-static std::mutex search_mutex;
-static std::condition_variable search_cv;
-static std::atomic<bool> searching(false);
-static bool search_worker_started = false;
-static bool search_worker_quit = false;
-static bool search_worker_has_job = false;
-static SearchJob pending_search_job;
-static uint64_t search_clear_request = 0;
-static uint64_t search_clear_done = 0;
-
-
+static int uci_thread_count = 1;
+static SearchThreadPool search_pool;
 
 static Move parse_move(Position& pos, const std::string& s)
 {
@@ -125,134 +99,39 @@ static void print_bestmove(Move best_move)
     std::cout << "\n" << std::flush;
 }
 
-static void search_worker_loop()
-{
-    std::unique_lock<std::mutex> lock(search_mutex);
-
-    while (true)
-    {
-        search_cv.wait(lock, [] {
-            return search_worker_quit
-                || search_worker_has_job
-                || search_clear_done != search_clear_request;
-            });
-
-        if (search_worker_quit)
-            break;
-
-        if (search_clear_done != search_clear_request)
-        {
-            const uint64_t request = search_clear_request;
-            lock.unlock();
-            clear_search_state_for_new_game();
-            tt_clear();
-            lock.lock();
-            search_clear_done = request;
-            search_cv.notify_all();
-            continue;
-        }
-
-        SearchJob job = pending_search_job;
-        search_worker_has_job = false;
-        lock.unlock();
-
-        SearchResult result = search(job.pos,
-            job.depth,
-            job.movetime,
-            job.time_left,
-            job.increment,
-            job.moves_to_go,
-            job.infinite,
-            job.nodes,
-            job.move_overhead,
-            false,
-            job.stop_epoch_baseline);
-
-        print_bestmove(result.best_move);
-
-        lock.lock();
-        searching = false;
-        search_cv.notify_all();
-    }
-}
-
 static void ensure_search_worker_started()
 {
-    if (search_worker_started)
-        return;
-
-    search_worker_quit = false;
-    search_thread = std::thread(search_worker_loop);
-    search_worker_started = true;
+    search_pool.set_thread_count(uci_thread_count);
 }
 
 static void wait_for_search_finished()
 {
-    if (!search_worker_started)
-        return;
-
-    std::unique_lock<std::mutex> lock(search_mutex);
-    search_cv.wait(lock, [] {
-        return !searching.load(std::memory_order_relaxed) && !search_worker_has_job;
-        });
+    search_pool.wait_for_idle();
 }
 
 static void stop_search_and_wait()
 {
-    if (!search_worker_started)
-        return;
-
-    stop_search_now();
-    wait_for_search_finished();
+    search_pool.stop_and_wait();
 }
 
 static void clear_worker_search_state()
 {
     ensure_search_worker_started();
     stop_search_and_wait();
-
-    std::unique_lock<std::mutex> lock(search_mutex);
-    ++search_clear_request;
-    search_cv.notify_one();
-    search_cv.wait(lock, [] {
-        return search_clear_done == search_clear_request;
-        });
+    search_pool.clear_worker_state();
 }
 
-static void start_search_job(const SearchJob& job)
+static void start_search_job(const ThreadSearchJob& job)
 {
     ensure_search_worker_started();
-
-    std::lock_guard<std::mutex> lock(search_mutex);
-    if (searching.load(std::memory_order_relaxed))
-        return;
-
-    pending_search_job = job;
-    pending_search_job.stop_epoch_baseline = current_stop_epoch();
-    search_worker_has_job = true;
-    searching = true;
-    search_cv.notify_one();
+    search_pool.start_search(job, [](const SearchResult& result) {
+        print_bestmove(result.best_move);
+        });
 }
 
 static void shutdown_search_worker()
 {
-    if (!search_worker_started)
-        return;
-
-    stop_search_and_wait();
-
-    {
-        std::lock_guard<std::mutex> lock(search_mutex);
-        search_worker_quit = true;
-        search_cv.notify_one();
-    }
-
-    if (search_thread.joinable())
-        search_thread.join();
-
-    search_worker_started = false;
-    search_worker_quit = false;
-    searching = false;
+    search_pool.shutdown();
 }
 
 static char piece_to_char(Piece pc)
@@ -365,6 +244,8 @@ void uci_loop()
             std::cout << "id name Shadow\n";
             std::cout << "id author TunCH\n";
             std::cout << "option name Hash type spin default " << tt_hash_mb() << " min 1 max 65536\n";
+            const int hw_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+            std::cout << "option name Threads type spin default 1 min 1 max " << hw_threads << "\n";
             std::cout << "option name Move Overhead type spin default "
                 << DEFAULT_MOVE_OVERHEAD_MS << " min " << MIN_MOVE_OVERHEAD_MS
                 << " max " << MAX_MOVE_OVERHEAD_MS << "\n";
@@ -445,7 +326,7 @@ void uci_loop()
                     catch (...) {}
                 }
 
-                if (searching)
+                if (search_pool.is_searching())
                     stop_search_and_wait();
 
                 if (tt_resize_mb(mb))
@@ -475,6 +356,20 @@ void uci_loop()
                 g_uci_show_wdl.store(show_wdl, std::memory_order_relaxed);
                 std::cout << "info string UCI_ShowWDL set to "
                     << (show_wdl ? "true" : "false") << "\n";
+            }
+            else if (name == "Threads")
+            {
+                int threads = uci_thread_count;
+                if (!value.empty())
+                {
+                    try { threads = std::stoi(value); }
+                    catch (...) {}
+                }
+
+                const int hw_threads = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+                uci_thread_count = std::clamp(threads, 1, std::max(1, hw_threads));
+                search_pool.set_thread_count(uci_thread_count);
+                std::cout << "info string Threads set to " << uci_thread_count << "\n";
             }
         }
 
@@ -564,7 +459,7 @@ void uci_loop()
 
         else if (line.rfind("go", 0) == 0)
         {
-            if (searching)
+            if (search_pool.is_searching())
                 wait_for_search_finished();
 
             int depth = 64;
@@ -616,17 +511,17 @@ void uci_loop()
             if (infinite || (movetime <= 0 && wtime <= 0 && btime <= 0 && depth <= 0 && nodes == 0))
                 infinite = true;
 
-            SearchJob job;
-            job.pos = pos;
-            job.depth = depth;
-            job.movetime = movetime;
-            job.time_left = timeLeft;
-            job.increment = inc;
-            job.moves_to_go = movestogo;
-            job.infinite = infinite;
-            job.nodes = nodes;
-            job.move_overhead = move_overhead_ms;
-            start_search_job(job);
+            auto job = std::make_unique<ThreadSearchJob>();
+            job->pos = pos;
+            job->depth = depth;
+            job->movetime = movetime;
+            job->time_left = timeLeft;
+            job->increment = inc;
+            job->moves_to_go = movestogo;
+            job->infinite = infinite;
+            job->nodes = nodes;
+            job->move_overhead = move_overhead_ms;
+            start_search_job(*job);
         }
 
 

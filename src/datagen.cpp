@@ -18,6 +18,7 @@
 #include <vector>
 #include <atomic>
 #include <csignal>
+#include <memory>
 
 inline constexpr int MATE_THRESHOLD = 28000;
 inline constexpr int SCORE_CLAMP = 3000;
@@ -497,6 +498,33 @@ namespace Shadow {
                     << " | Speed: " << games_per_second << " games/s\n";
             }
 
+            struct TTContextDeleter {
+                void operator()(TTContext* context) const
+                {
+                    tt_destroy_context(context);
+                }
+            };
+
+            class ScopedTTContext {
+            public:
+                explicit ScopedTTContext(TTContext* context)
+                    : previous_(tt_current_context())
+                {
+                    tt_bind_context(context);
+                }
+
+                ~ScopedTTContext()
+                {
+                    tt_bind_context(previous_);
+                }
+
+                ScopedTTContext(const ScopedTTContext&) = delete;
+                ScopedTTContext& operator=(const ScopedTTContext&) = delete;
+
+            private:
+                TTContext* previous_ = nullptr;
+            };
+
             static void generation_worker(int worker_id,
                 DatagenShared& shared,
                 const std::vector<std::string>& opening_fens,
@@ -505,9 +533,18 @@ namespace Shadow {
                 int nodes_per_move,
                 uint32_t seed)
             {
-                (void)worker_id;
+                std::unique_ptr<TTContext, TTContextDeleter> local_tt(tt_create_context(DATAGEN_HASH_MB));
+                if (!local_tt) {
+                    {
+                        std::lock_guard<std::mutex> lock(shared.log_mutex);
+                        std::cerr << "Datagen worker " << worker_id
+                            << ": failed to allocate local TT (" << DATAGEN_HASH_MB << " MB)\n";
+                    }
+                    request_datagen_stop();
+                    return;
+                }
 
-                tt_resize_mb(DATAGEN_HASH_MB);
+                ScopedTTContext tt_scope(local_tt.get());
 
                 std::mt19937 rng(seed);
                 GeneratedGame game;
@@ -634,8 +671,6 @@ namespace Shadow {
                 std::cerr << "Datagen: failed to open " << output_path << "\n";
                 return;
             }
-
-            tt_resize_mb(DATAGEN_HASH_MB);
 
             const int worker_count = std::min(thread_count, target_games);
             std::cerr << "Starting ViriFormat Datagen: " << target_games
