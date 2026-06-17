@@ -846,7 +846,7 @@ void Position::refresh_check_info() {
     check_squares_bb[KING] = BB_EMPTY;
 }
 
-bool Position::make_move(Move m, bool assume_pseudo_legal) {
+bool Position::make_move(Move m, bool assume_pseudo_legal, bool assume_legal) {
     if (ply >= MAX_GAME_PLY - 1)
         return false;
 
@@ -999,10 +999,12 @@ bool Position::make_move(Move m, bool assume_pseudo_legal) {
     if (us == BLACK)
         ++fullmove_number_state;
 
-    const Square ourKing = king_square(us);
-    if (ourKing != SQ_NONE && is_square_attacked(*this, ourKing, ~us)) {
-        undo_move();
-        return false;
+    if (!assume_legal) {
+        const Square ourKing = king_square(us);
+        if (ourKing != SQ_NONE && is_square_attacked(*this, ourKing, ~us)) {
+            undo_move();
+            return false;
+        }
     }
 
     refresh_check_info();

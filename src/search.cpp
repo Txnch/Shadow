@@ -675,7 +675,7 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
             }
         }
 
-        if (!pos.make_move(m, true))
+        if (!pos.make_move(m, true, true))
             continue;
 
         ss[ply + 1].acc_valid = false;
@@ -901,7 +901,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 if (movepick_see_ge(pos, m, 0))
                 {
                     Piece movedPiece = pos.piece_on(from_sq(m));
-                    if (pos.make_move(m, true))
+                    if (pos.make_move(m, true, true))
                     {
                         ss[ply + 1].acc_valid = false;
                         ss[ply].current_move = m;
@@ -1066,10 +1066,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             && std::abs(tt_score) < MATE_SCORE - MAX_PLY
             && !is_shuffling(m, ss, ply, pos))
         {
-            if (!pos.make_move(m, true))
-                continue;
-            pos.undo_move();
-
             int singular_beta = tt_score - (depth * SINGULAR_BETA_MARGIN) / 64;
 
             ss[ply].excluded_move = m;
@@ -1097,7 +1093,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
 
-        if (!pos.make_move(m, true))
+        if (!pos.make_move(m, true, true))
             continue;
 
         ss[ply + 1].acc_valid = false;
@@ -1479,37 +1475,20 @@ static void initialize_search_stack(SearchStack* ss)
 
 static void generate_legal_root_moves(Position& pos, MoveList& root_moves)
 {
-    MoveList pseudo_legal_root_moves;
-    generate_moves(pos, pseudo_legal_root_moves);
-
-    root_moves.size = 0;
-    for (int i = 0; i < pseudo_legal_root_moves.size; ++i)
-    {
-        Move m = pseudo_legal_root_moves.moves[i];
-        if (pos.make_move(m, true))
-        {
-            root_moves.push(m);
-            pos.undo_move();
-        }
-    }
+    generate_moves(pos, root_moves);
 }
 
 static bool has_legal_move(Position& pos, Move excluded_move)
 {
-    MoveList pseudo_legal_moves;
-    generate_moves(pos, pseudo_legal_moves);
+    MoveList legal_moves;
+    generate_moves(pos, legal_moves);
 
-    for (int i = 0; i < pseudo_legal_moves.size; ++i)
+    for (int i = 0; i < legal_moves.size; ++i)
     {
-        Move m = pseudo_legal_moves.moves[i];
+        Move m = legal_moves.moves[i];
         if (!m || m == excluded_move)
             continue;
-
-        if (pos.make_move(m, true))
-        {
-            pos.undo_move();
-            return true;
-        }
+        return true;
     }
 
     return false;

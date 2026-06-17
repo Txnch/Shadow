@@ -32,7 +32,7 @@ public:
     void clear();
     void set_fen(const std::string& fen);
 
-    bool make_move(Move m, bool assume_pseudo_legal = false);
+    bool make_move(Move m, bool assume_pseudo_legal = false, bool assume_legal = false);
     void undo_move();
     void do_null_move();
     void undo_null_move();

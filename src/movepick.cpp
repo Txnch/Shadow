@@ -277,7 +277,7 @@ Move MovePicker::next(bool skip_quiets) {
 
         case ST_TT:
             stage = ST_GEN_CAPTURES;
-            if (has_tt && pos_ptr->is_pseudo_legal(tt)) {
+            if (has_tt && pos_ptr->is_legal(tt)) {
                 return tt;
             }
             continue;
@@ -334,21 +334,21 @@ Move MovePicker::next(bool skip_quiets) {
 
         case ST_KILLER1:
             stage = ST_KILLER2;
-            if (has_k1 && pos_ptr->is_pseudo_legal(killer_1) && !is_capture(killer_1) && !is_promotion(killer_1)) {
+            if (has_k1 && pos_ptr->is_legal(killer_1) && !is_capture(killer_1) && !is_promotion(killer_1)) {
                 return killer_1;
             }
             continue;
 
         case ST_KILLER2:
             stage = ST_COUNTER;
-            if (has_k2 && pos_ptr->is_pseudo_legal(killer_2) && !is_capture(killer_2) && !is_promotion(killer_2)) {
+            if (has_k2 && pos_ptr->is_legal(killer_2) && !is_capture(killer_2) && !is_promotion(killer_2)) {
                 return killer_2;
             }
             continue;
 
         case ST_COUNTER:
             stage = ST_GEN_QUIETS;
-            if (has_counter && pos_ptr->is_pseudo_legal(counter) && !is_capture(counter) && !is_promotion(counter)) {
+            if (has_counter && pos_ptr->is_legal(counter) && !is_capture(counter) && !is_promotion(counter)) {
                 return counter;
             }
             continue;
@@ -453,7 +453,7 @@ Move MovePicker::next(bool skip_quiets) {
         case ST_QS_TT:
             stage = ST_QS_GEN;
             if (has_tt
-                && pos_ptr->is_pseudo_legal(tt)
+                && pos_ptr->is_legal(tt)
                 && (qs_in_check || is_capture(tt) || is_promotion(tt))) {
                 return tt;
             }
