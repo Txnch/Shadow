@@ -27,6 +27,7 @@ inline constexpr int STAT_BONUS_BASE = 15;
 inline constexpr int STAT_MALUS_MAX = 1047;
 inline constexpr int STAT_MALUS_MULT = 196;
 inline constexpr int STAT_MALUS_BASE = 25;
+inline constexpr int LMP_HISTORY_SCALE = 1024;
 
 inline constexpr int ROOT_ASPIRATION_DEPTH = 3;
 inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
@@ -1022,6 +1023,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         // LMP
         if (!isRoot && !inChk && isQuiet && depth <= 8 && std::abs(alpha) < MATE_SCORE - MAX_PLY && moveCount > 0) {
             int lmp_threshold = (3 + depth * depth) / (improving ? 1 : 2);
+            lmp_threshold += (hist_score * LMP_HISTORY_SCALE) / 8388608;
             if (moveCount >= lmp_threshold) {
                 skip_quiets = true;
                 pruned_or_skipped_move = true;
