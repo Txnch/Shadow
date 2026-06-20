@@ -34,6 +34,13 @@ inline constexpr int FP_HISTORY_DIVISOR = 101;
 inline constexpr int FP_ALPHA_LIMIT = 2000;
 inline constexpr int FP_MAX_LMR_DEPTH = 8;
 inline constexpr int LMR_DEPTH_TTPV_SCALE = 718;
+inline constexpr int RFP_MAX_DEPTH = 12;
+inline constexpr int RFP_CONSTANT_MARGIN = 2;
+inline constexpr int RFP_LINEAR_MARGIN = 84;
+inline constexpr int RFP_QUAD_MARGIN = 7;
+inline constexpr int RFP_IMPROVING_MARGIN = 74;
+inline constexpr int RFP_CORRPLEXITY_SCALE = 63;
+inline constexpr int RFP_FAIL_FIRM_T = 700;
 
 inline constexpr int ROOT_ASPIRATION_DEPTH = 3;
 inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
@@ -168,6 +175,16 @@ static inline int draw_score()
 static inline int clamp_eval_score(int score)
 {
     return std::clamp(score, -MAX_EVAL_SCORE, MAX_EVAL_SCORE);
+}
+
+static inline bool is_decisive_score(int score)
+{
+    return std::abs(score) >= MATE_SCORE - MAX_PLY;
+}
+
+static inline int interpolate_1024(int a, int b, int t)
+{
+    return static_cast<int>((int64_t(a) * (1024 - t) + int64_t(b) * t) / 1024);
 }
 
 static inline void update_history_gravity(int& hist, int bonus)
@@ -823,10 +840,13 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
     int raw_eval = tt_hit ? tt_static_eval : eval_from_stack(pos, ss, ply);
     int staticEval = raw_eval;
+    int corrplexity = 0;
 
     if (!inChk) {
         staticEval = scale_rule50_eval(staticEval, pos);
-        staticEval += get_eval_correction(pos, ss, ply);
+        const int correction = get_eval_correction(pos, ss, ply);
+        staticEval += correction;
+        corrplexity = std::abs(correction);
 
         if (pos.pieces(PAWN) == 0 && std::abs(staticEval) < MATE_SCORE - 1000) {
             int nonPawnMat = total_pieces(pos);
@@ -847,20 +867,36 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
     // Improving
     bool improving = false;
+    bool rfp_improving = !inChk;
     if (!inChk) {
-        if (ply >= 2 && ss[ply - 2].static_eval != -INF)
+        if (ply >= 2 && ss[ply - 2].static_eval != -INF) {
             improving = staticEval > ss[ply - 2].static_eval;
-        else if (ply >= 4 && ss[ply - 4].static_eval != -INF)
+            rfp_improving = improving;
+        }
+        else if (ply >= 4 && ss[ply - 4].static_eval != -INF) {
             improving = staticEval > ss[ply - 4].static_eval;
+            rfp_improving = improving;
+        }
     }
 
     if constexpr (!isPV) {
         // RFP
-        if (!inChk && std::abs(beta) < MATE_SCORE - MAX_PLY && depth <= 3 && ss[ply].excluded_move == 0)
+        if (!inChk
+            && depth <= RFP_MAX_DEPTH
+            && ss[ply].excluded_move == 0
+            && !is_decisive_score(beta))
         {
-            int rfp_margin = 120 * depth;
-            if (staticEval - rfp_margin >= beta && staticEval < 10000)
-                return staticEval;
+            const int rfp_margin = RFP_CONSTANT_MARGIN
+                + RFP_LINEAR_MARGIN * depth
+                + RFP_QUAD_MARGIN * depth * depth
+                - (rfp_improving ? RFP_IMPROVING_MARGIN : 0)
+                + (corrplexity * RFP_CORRPLEXITY_SCALE) / 128;
+
+            if (staticEval - rfp_margin >= beta) {
+                return is_decisive_score(staticEval)
+                    ? staticEval
+                    : interpolate_1024(staticEval, beta, RFP_FAIL_FIRM_T);
+            }
         }
 
         // NMP
