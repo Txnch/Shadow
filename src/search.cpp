@@ -28,6 +28,12 @@ inline constexpr int STAT_MALUS_MAX = 1047;
 inline constexpr int STAT_MALUS_MULT = 196;
 inline constexpr int STAT_MALUS_BASE = 25;
 inline constexpr int LMP_HISTORY_SCALE = 1024;
+inline constexpr int FP_MARGIN = 274;
+inline constexpr int FP_SCALE = 68;
+inline constexpr int FP_HISTORY_DIVISOR = 101;
+inline constexpr int FP_ALPHA_LIMIT = 2000;
+inline constexpr int FP_MAX_LMR_DEPTH = 8;
+inline constexpr int LMR_DEPTH_TTPV_SCALE = 718;
 
 inline constexpr int ROOT_ASPIRATION_DEPTH = 3;
 inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
@@ -62,6 +68,18 @@ static int init_lmr_table = []() {
     }
     return 0;
     }();
+
+static inline int futility_lmr_depth(int depth, int moveCount, bool ttPv)
+{
+    const int d = std::min(depth, 63);
+    const int c = std::min(moveCount + 1, 255);
+    int reduction = LMR_TABLE[1][d][c];
+
+    if (ttPv)
+        reduction += LMR_DEPTH_TTPV_SCALE;
+
+    return std::max(depth - reduction / LMR_SCALE, 0);
+}
 
 static std::atomic<uint64_t> global_stop_epoch(0);
 static thread_local SearchThreadState search_state;
@@ -1020,6 +1038,8 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             hist_score = capture_history_score(pos, m);
         }
 
+        const bool givesChk = pos.gives_check(m);
+
         // LMP
         if (!isRoot && !inChk && isQuiet && depth <= 8 && std::abs(alpha) < MATE_SCORE - MAX_PLY && moveCount > 0) {
             int lmp_threshold = (3 + depth * depth) / (improving ? 1 : 2);
@@ -1032,15 +1052,14 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         }
 
         if constexpr (!isPV) {
-            if (!inChk && isQuiet && depth <= 8 && std::abs(alpha) < MATE_SCORE - MAX_PLY) {
-                int fp_margin = 120 * depth;
-                if (m != search_state.killer_moves[0][ply] && m != search_state.killer_moves[1][ply] && hist_score < 4000) {
-                    const int futility_score = staticEval + fp_margin;
-                    if (futility_score <= alpha) {
-                        best_score = std::max(best_score, futility_score);
-                        pruned_or_skipped_move = true;
-                        continue;
-                    }
+            if (best_score > -MAX_EVAL_SCORE && !inChk && isQuiet && std::abs(alpha) < FP_ALPHA_LIMIT) {
+                const int lmr_depth = futility_lmr_depth(depth, moveCount, ss[ply].tt_pv);
+                const int futility_score = staticEval + FP_MARGIN + depth * FP_SCALE + hist_score / FP_HISTORY_DIVISOR;
+
+                if (lmr_depth <= FP_MAX_LMR_DEPTH && !givesChk && futility_score <= alpha) {
+                    skip_quiets = true;
+                    pruned_or_skipped_move = true;
+                    continue;
                 }
             }
         }
@@ -1053,8 +1072,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 continue;
             }
         }
-
-        const bool givesChk = pos.gives_check(m);
 
         int ext = 0;
         const bool tt_has_lower_bound = tt_flag == TT_BETA || tt_flag == TT_EXACT;
