@@ -902,7 +902,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         // NMP
         bool prev_is_null = (ply > 0 && ss[ply - 1].current_move == 0);
 
-        if (cutNode && allow_nmp && !inChk && !prev_is_null && ss[ply].excluded_move == 0 && depth >= 4 && ply >= search_state.nmp_min_ply && staticEval >= beta && staticEval < 10000 && has_non_pawn_material(pos, pos.side_to_move()))
+        if (cutNode && allow_nmp && !inChk && !prev_is_null && ss[ply].excluded_move == 0 && depth >= 4 && ply >= search_state.nmp_min_ply && !(tt_hit && tt_flag == TT_ALPHA && tt_score < beta) && staticEval >= beta && staticEval < 10000 && has_non_pawn_material(pos, pos.side_to_move()))
         {
             int R = 3 + depth / 3 + std::min(2, (staticEval - beta) / 200);
             R = std::min(R, depth);
@@ -931,11 +931,11 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                         return alpha;
 
                     if (verified_score >= beta) {
-                        return null_score >= MATE_SCORE - MAX_PLY ? beta : null_score;
+                        return is_decisive_score(null_score) ? beta : null_score;
                     }
                 }
                 else {
-                    return null_score >= MATE_SCORE - MAX_PLY ? beta : null_score;
+                    return is_decisive_score(null_score) ? beta : null_score;
                 }
             }
         }
