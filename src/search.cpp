@@ -961,53 +961,42 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         // ProbCut
         if (!inChk && depth >= 5 && std::abs(beta) < MATE_SCORE - MAX_PLY && ss[ply].excluded_move == 0)
         {
-            int probcut_beta = beta + 200 - (improving ? 50 : 0);
+            int probcut_beta = beta + 160 - 40 * (improving ? 1 : 0);
+            MovePicker pc_picker;
+            pc_picker.init_qsearch(pos, false, tt_move);
             int pc_count = 0;
 
-            MovePicker pc_picker;
-            pc_picker.init_qsearch(pos, inChk, tt_move);
-
-            for (Move m = pc_picker.next(false); m; m = pc_picker.next(false))
+            while (pc_count < 5)
             {
-                if (pc_count++ >= 3) break;
+                Move m = pc_picker.next(false);
+                if (!m) break;
+                if (!movepick_see_ge(pos, m, 0)) continue;
+                pc_count++;
 
-                if (movepick_see_ge(pos, m, 0))
+                Piece movedPiece = pos.piece_on(from_sq(m));
+                if (!pos.make_move(m, true, true)) continue;
+
+                ss[ply + 1].acc_valid = false;
+                ss[ply].current_move = m;
+                ss[ply].moved_piece = movedPiece;
+
+                int score = -qsearch(pos, -probcut_beta, -probcut_beta + 1, ply + 1, ss);
+                if (score >= probcut_beta)
                 {
-                    Piece movedPiece = pos.piece_on(from_sq(m));
-                    if (pos.make_move(m, true, true))
+                    score = -negamax<NonPV>(pos, depth - 3, -probcut_beta, -probcut_beta + 1, ply + 1, ss, true, !cutNode);
+                    if (score >= probcut_beta)
                     {
-                        ss[ply + 1].acc_valid = false;
-                        ss[ply].current_move = m;
-                        ss[ply].moved_piece = movedPiece;
-
-                        int score = -qsearch(pos, -probcut_beta, -probcut_beta + 1, ply + 1, ss);
-
-                        if (score >= probcut_beta)
-                        {
-                            score = -negamax<NonPV>(pos, depth - 4, -probcut_beta, -probcut_beta + 1, ply + 1, ss);
-                        }
-
                         pos.undo_move();
-
-                        if (search_stop_requested())
-                        {
-                            ss[ply].current_move = 0;
-                            ss[ply].moved_piece = NO_PIECE;
-                            return alpha;
-                        }
-
-                        if (score >= probcut_beta)
-                        {
-                            int store_score = score >= MATE_SCORE - MAX_PLY ? beta : score;
-                            tt_store(key, depth - 3, score_to_tt(store_score, ply), TT_BETA, m, raw_eval);
-
-                            ss[ply].current_move = 0;
-                            ss[ply].moved_piece = NO_PIECE;
-                            return store_score;
-                        }
+                        int store_score = (score >= MATE_SCORE - MAX_PLY) ? beta : score;
+                        tt_store(key, depth - 3, score_to_tt(store_score, ply), TT_BETA, m, raw_eval);
+                        ss[ply].current_move = 0;
+                        ss[ply].moved_piece = NO_PIECE;
+                        return store_score;
                     }
                 }
+                pos.undo_move();
             }
+
             ss[ply].current_move = 0;
             ss[ply].moved_piece = NO_PIECE;
         }
