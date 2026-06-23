@@ -47,6 +47,7 @@ inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
 inline constexpr int ROOT_ASPIRATION_WIDENING_FACTOR = 17;
 inline constexpr int ROOT_ASPIRATION_REDUCTION_MAX = 3;
 inline constexpr int QS_MAX_PLY_GUARD = MAX_PLY - 4;
+inline constexpr int QS_FUTILITY_MARGIN = 153;
 inline constexpr int SINGULAR_BETA_MARGIN = 64;
 inline constexpr int SINGULAR_DOUBLE_EXT_MARGIN = 13;
 inline constexpr int SINGULAR_TRIPLE_EXT_MARGIN = 121;
@@ -369,6 +370,18 @@ static inline Piece captured_piece_for_move(const Position& pos, Move m)
         return make_piece(~pos.side_to_move(), PAWN);
 
     return pos.piece_on(to_sq(m));
+}
+
+static inline int qsearch_piece_value(Piece pc)
+{
+    switch (piece_type(pc)) {
+    case PAWN:   return 100;
+    case KNIGHT: return 300;
+    case BISHOP: return 300;
+    case ROOK:   return 500;
+    case QUEEN:  return 900;
+    default:     return 0;
+    }
 }
 
 static inline int capture_history_score(const Position& pos, Move m)
@@ -706,6 +719,11 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         }
 
         if (!inChk && is_capture(m) && !is_promotion(m)) {
+            const int futility_value = stand_pat + QS_FUTILITY_MARGIN + qsearch_piece_value(captured_piece_for_move(pos, m));
+            if (futility_value <= alpha && !movepick_see_ge(pos, m, 1)) {
+                continue;
+            }
+
             if (!movepick_see_ge(pos, m, -73)) {
                 continue;
             }
