@@ -9,7 +9,7 @@ class Position;
 namespace nnue {
 
     static constexpr int INPUTS = 768;
-    static constexpr int HIDDEN = 256;
+    static constexpr int HIDDEN = 512;
     static constexpr int OUTPUT_BUCKETS = 8;
 
     struct AccumulatorPair {

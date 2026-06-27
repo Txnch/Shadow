@@ -39,7 +39,7 @@ namespace nnue {
     static constexpr int QA = 255;
     static constexpr int QB = 64;
     static constexpr int BUCKET_DIVISOR = 4;
-    static constexpr int NETWORK_SCALE = 400;
+    static constexpr int NETWORK_SCALE = 355;
 
     enum class LoadSource {
         None,

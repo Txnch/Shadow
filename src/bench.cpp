@@ -1,19 +1,23 @@
 #include "bench.h"
-
 #include "move.h"
 #include "position.h"
 #include "search.h"
 #include "tt.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <fstream>   
+#include <vector>    
 #include <streambuf>
 #include <string>
 #include <thread>
 #include <utility>
+
+
+int evaluate(const Position& pos);
+int raw_eval = 0;
 
 namespace Shadow::Bench {
     namespace {
@@ -134,12 +138,43 @@ namespace Shadow::Bench {
             std::streambuf* previous_;
         };
 
+
+        std::vector<std::string> load_fens(std::ostream& out) {
+            std::vector<std::string> fens;
+            std::ifstream file("fen.txt");
+
+            if (file.is_open()) {
+                std::string line;
+                while (std::getline(file, line)) {
+                    if (!line.empty()) {
+                        fens.push_back(line);
+
+                        if (fens.size() >= 3000000) {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (fens.empty()) {
+                for (const char* fen : BENCH_FENS) {
+                    fens.push_back(fen);
+                }
+                out << "info string loaded default FENs\n" << std::flush;
+            }
+            else {
+                out << "info string loaded " << fens.size() << " FENs from fen.txt\n" << std::flush;
+            }
+            return fens;
+        }
+
     } // namespace
 
-    Result run(std::ostream& out, int requested_depth)
+
+    Result run_fens(std::ostream& out, int requested_depth, const std::vector<std::string>& fens)
     {
         const int depth = clamp_depth(requested_depth);
-        const int positions = int(sizeof(BENCH_FENS) / sizeof(BENCH_FENS[0]));
+        const int positions = int(fens.size());
 
         Result result{};
         result.depth = depth;
@@ -148,8 +183,13 @@ namespace Shadow::Bench {
 
         SearchInfoGuard search_info_guard;
 
+        long long total_search_score = 0;
+        double total_absolute_eval = 0.0;
+
         out << "info string bench depth " << depth
             << " positions " << positions << "\n" << std::flush;
+
+        int successful_positions = 0;
 
         for (int i = 0; i < positions; ++i) {
             SearchResult search_result{};
@@ -159,11 +199,12 @@ namespace Shadow::Bench {
             std::thread worker([&, i] {
                 try {
                     Position pos;
-                    pos.set_fen(BENCH_FENS[i]);
+                    pos.set_fen(fens[i].c_str());
 
                     clear_search_state_for_new_game();
                     tt_clear();
 
+                    raw_eval = evaluate(pos);
                     const auto start = std::chrono::steady_clock::now();
                     {
                         CoutSilencer silence_search_info;
@@ -189,28 +230,27 @@ namespace Shadow::Bench {
             worker.join();
 
             if (!error.empty()) {
-                out << "info string bench error position " << (i + 1)
-                    << " exception " << error
-                    << "\n" << std::flush;
-                break;
+                out << "info string bench error position " << (i + 1) << " (skipping)\n" << std::flush;
+                continue;
             }
 
             if (search_result.depth <= 0 && search_result.best_move == 0 && search_result.nodes == 0) {
-                out << "info string bench error position " << (i + 1)
-                    << " no search result\n" << std::flush;
-                break;
+                out << "info string bench warning position " << (i + 1) << " no search result (skipping)\n" << std::flush;
+                continue;
             }
 
-            const uint64_t nps = elapsed_ms > 0
-                ? search_result.nodes * 1000ULL / uint64_t(elapsed_ms)
-                : 0ULL;
+            successful_positions++;
+
+            const uint64_t nps = elapsed_ms > 0 ? search_result.nodes * 1000ULL / uint64_t(elapsed_ms) : 0ULL;
+
+            total_search_score += search_result.score;
+            total_absolute_eval += std::abs(raw_eval);
 
             result.elapsed_ms += elapsed_ms;
             result.nodes += search_result.nodes;
             result.signature = mix_signature(result.signature, search_result);
 
-            out << "info string bench "
-                << (i + 1) << "/" << positions
+            out << "info string bench " << (i + 1) << "/" << positions
                 << " depth " << search_result.depth
                 << " nodes " << search_result.nodes
                 << " time " << elapsed_ms
@@ -221,9 +261,10 @@ namespace Shadow::Bench {
             out << "\n" << std::flush;
         }
 
-        result.nps = result.elapsed_ms > 0
-            ? result.nodes * 1000ULL / uint64_t(result.elapsed_ms)
-            : 0ULL;
+        result.nps = result.elapsed_ms > 0 ? result.nodes * 1000ULL / uint64_t(result.elapsed_ms) : 0ULL;
+        int average_search_score = successful_positions > 0 ? (total_search_score / successful_positions) : 0;
+        double average_abs_eval = successful_positions > 0 ? total_absolute_eval / successful_positions : 0.0;
+        result.positions = successful_positions;
 
         out << "info string bench total"
             << " depth " << result.depth
@@ -231,10 +272,84 @@ namespace Shadow::Bench {
             << " nodes " << result.nodes
             << " time " << result.elapsed_ms
             << " nps " << result.nps
+            << " avg_score " << average_search_score
+            << " avg_abs_eval " << average_abs_eval
             << " signature " << result.signature
             << "\n" << std::flush;
 
         return result;
+    }
+
+    Result run(std::ostream& out, int requested_depth)
+    {
+        std::vector<std::string> fens = load_fens(out);
+        return run_fens(out, requested_depth, fens);
+    }
+
+
+    Result run_eval_fens(std::ostream& out, const std::vector<std::string>& fens)
+    {
+        const int positions = int(fens.size());
+        Result result{};
+
+        double total_absolute_eval = 0.0;
+        int successful_positions = 0;
+
+        out << "info string bench eval starting for " << positions << " positions\n" << std::flush;
+
+        const auto start = std::chrono::steady_clock::now();
+
+
+        for (int i = 0; i < positions; ++i) {
+            std::string error;
+            try {
+                Position pos;
+                pos.set_fen(fens[i].c_str());
+
+                int eval = evaluate(pos);
+                total_absolute_eval += std::abs(eval);
+                successful_positions++;
+            }
+            catch (const std::exception& e) {
+                error = e.what();
+            }
+            catch (...) {
+                error = "unknown exception";
+            }
+
+            if (!error.empty()) {
+                out << "info string bench eval error position " << (i + 1)
+                    << " exception " << error
+                    << " (skipping)\n" << std::flush;
+                continue;
+            }
+
+
+            if ((i + 1) % 100000 == 0 || (i + 1) == positions) {
+                out << "info string bench eval progress " << (i + 1) << "/" << positions << "\n" << std::flush;
+            }
+        }
+
+        const auto end = std::chrono::steady_clock::now();
+        result.elapsed_ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
+        result.positions = successful_positions;
+
+        double average_abs_eval = successful_positions > 0 ? total_absolute_eval / successful_positions : 0.0;
+
+
+        out << "info string bench eval total"
+            << " positions " << result.positions
+            << " time " << result.elapsed_ms << "ms"
+            << " avg_abs_eval " << average_abs_eval
+            << "\n" << std::flush;
+
+        return result;
+    }
+
+    Result run_eval(std::ostream& out)
+    {
+        std::vector<std::string> fens = load_fens(out);
+        return run_eval_fens(out, fens);
     }
 
 } // namespace Shadow::Bench

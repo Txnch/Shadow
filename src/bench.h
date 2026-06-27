@@ -15,5 +15,6 @@ namespace Shadow::Bench {
     };
 
     Result run(std::ostream& out, int depth);
+    Result run_eval(std::ostream& out);
 
 } // namespace Shadow::Bench

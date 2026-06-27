@@ -274,23 +274,35 @@ void uci_loop()
         {
             stop_search_and_wait();
 
-            int depth = 10;
             std::istringstream ss(line);
             std::string token;
             ss >> token;
 
             if (ss >> token)
             {
-                if (token == "depth")
-                    ss >> depth;
+                if (token == "eval")
+                {
+                    Shadow::Bench::run_eval(std::cout);
+                }
                 else
                 {
-                    try { depth = std::stoi(token); }
-                    catch (...) {}
+                    int depth = 10;
+                    if (token == "depth")
+                    {
+                        ss >> depth;
+                    }
+                    else
+                    {
+                        try { depth = std::stoi(token); }
+                        catch (...) {}
+                    }
+                    Shadow::Bench::run(std::cout, depth);
                 }
             }
-
-            Shadow::Bench::run(std::cout, depth);
+            else
+            {
+                Shadow::Bench::run(std::cout, 10);
+            }
         }
 
         else if (line.rfind("setoption", 0) == 0)
