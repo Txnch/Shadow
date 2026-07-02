@@ -366,14 +366,14 @@ Move MovePicker::next(bool skip_quiets) {
             Bitboard threatByLesser[PIECE_TYPE_NB] = { 0 };
             Color opp = ~pos_ptr->side_to_move();
 
-            // ดึงค่าพื้นที่โจมตีจาก Position โดยตรง
+
             Bitboard pawnAttacks = pos_ptr->attacks_by(opp, PAWN);
             Bitboard knightAttacks = pos_ptr->attacks_by(opp, KNIGHT);
             Bitboard bishopAttacks = pos_ptr->attacks_by(opp, BISHOP);
             Bitboard rookAttacks = pos_ptr->attacks_by(opp, ROOK);
             Bitboard queenAttacks = pos_ptr->attacks_by(opp, QUEEN);
 
-            // เรียงลำดับ Threat แบบเดิม
+
             threatByLesser[PAWN] = 0;
             threatByLesser[KNIGHT] = threatByLesser[BISHOP] = pawnAttacks;
             threatByLesser[ROOK] = pawnAttacks | knightAttacks | bishopAttacks;
