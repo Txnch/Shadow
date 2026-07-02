@@ -365,26 +365,15 @@ Move MovePicker::next(bool skip_quiets) {
 
             Bitboard threatByLesser[PIECE_TYPE_NB] = { 0 };
             Color opp = ~pos_ptr->side_to_move();
-            Bitboard occ = pos_ptr->all_pieces();
 
-            Bitboard oppPawns = pos_ptr->pieces(PAWN) & pos_ptr->pieces(opp);
-            Bitboard oppKnights = pos_ptr->pieces(KNIGHT) & pos_ptr->pieces(opp);
-            Bitboard oppBishops = pos_ptr->pieces(BISHOP) & pos_ptr->pieces(opp);
-            Bitboard oppRooks = pos_ptr->pieces(ROOK) & pos_ptr->pieces(opp);
-            Bitboard oppQueens = pos_ptr->pieces(QUEEN) & pos_ptr->pieces(opp);
+            // ดึงค่าพื้นที่โจมตีจาก Position โดยตรง
+            Bitboard pawnAttacks = pos_ptr->attacks_by(opp, PAWN);
+            Bitboard knightAttacks = pos_ptr->attacks_by(opp, KNIGHT);
+            Bitboard bishopAttacks = pos_ptr->attacks_by(opp, BISHOP);
+            Bitboard rookAttacks = pos_ptr->attacks_by(opp, ROOK);
+            Bitboard queenAttacks = pos_ptr->attacks_by(opp, QUEEN);
 
-            Bitboard pawnAttacks = 0, knightAttacks = 0, bishopAttacks = 0, rookAttacks = 0, queenAttacks = 0;
-
-            while (oppPawns) pawnAttacks |= PawnAttacks[opp][pop_lsb_local(oppPawns)];
-            while (oppKnights) knightAttacks |= KnightAttacks[pop_lsb_local(oppKnights)];
-            while (oppBishops) bishopAttacks |= get_bishop_attacks(pop_lsb_local(oppBishops), occ);
-            while (oppRooks) rookAttacks |= get_rook_attacks(pop_lsb_local(oppRooks), occ);
-            while (oppQueens) {
-                Square sq = pop_lsb_local(oppQueens);
-                queenAttacks |= get_bishop_attacks(sq, occ) | get_rook_attacks(sq, occ);
-            }
-
-
+            // เรียงลำดับ Threat แบบเดิม
             threatByLesser[PAWN] = 0;
             threatByLesser[KNIGHT] = threatByLesser[BISHOP] = pawnAttacks;
             threatByLesser[ROOK] = pawnAttacks | knightAttacks | bishopAttacks;

@@ -1150,3 +1150,37 @@ void Position::undo_null_move() {
     check_squares_bb = ci.check_squares_bb;
 }
 
+Bitboard Position::attacks_by(Color c, PieceType pt) const {
+    Bitboard attacks = BB_EMPTY;
+    Bitboard p_bb = pieces(pt) & pieces(c);
+    Bitboard occ = all_pieces();
+
+    if (pt == PAWN) {
+        if (c == WHITE) {
+            attacks = north_east(p_bb) | north_west(p_bb);
+        }
+        else {
+            attacks = south_east(p_bb) | south_west(p_bb);
+        }
+    }
+    else if (pt == KNIGHT) {
+        while (p_bb) attacks |= KnightAttacks[pop_lsb(p_bb)];
+    }
+    else if (pt == BISHOP) {
+        while (p_bb) attacks |= get_bishop_attacks(pop_lsb(p_bb), occ);
+    }
+    else if (pt == ROOK) {
+        while (p_bb) attacks |= get_rook_attacks(pop_lsb(p_bb), occ);
+    }
+    else if (pt == QUEEN) {
+        while (p_bb) {
+            Square sq = pop_lsb(p_bb);
+            attacks |= get_bishop_attacks(sq, occ) | get_rook_attacks(sq, occ);
+        }
+    }
+    else if (pt == KING) {
+        if (p_bb) attacks |= KingAttacks[lsb(p_bb)];
+    }
+
+    return attacks;
+}

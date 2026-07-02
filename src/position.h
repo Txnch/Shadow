@@ -37,6 +37,7 @@ public:
     void do_null_move();
     void undo_null_move();
 
+    Bitboard attacks_by(Color c, PieceType pt) const;
     Bitboard pieces(Color c) const;
     Bitboard pieces(PieceType pt) const;
     Bitboard all_pieces() const { return occ_all; }
