@@ -214,23 +214,6 @@ namespace Shadow {
                     | ((move_type & 0x3) << 14));
             }
 
-            static MoveList get_legal_moves(Position& pos)
-            {
-                MoveList pseudo;
-                MoveList legal;
-                generate_moves(pos, pseudo);
-
-                for (int i = 0; i < pseudo.size; ++i) {
-                    const Move m = pseudo.moves[i];
-                    if (pos.make_move(m)) {
-                        legal.push(m);
-                        pos.undo_move();
-                    }
-                }
-
-                return legal;
-            }
-
             static bool write_game(std::ofstream& out,
                 ViriPackedBoard start_board,
                 const std::vector<ViriMoveScore>& moves,
@@ -321,7 +304,9 @@ namespace Shadow {
                 }
 
                 for (int i = 0; i < open_plies; ++i) {
-                    MoveList moves = get_legal_moves(pos);
+                    MoveList moves;
+                    generate_moves(pos, moves);
+
                     if (moves.size == 0) {
                         valid = false;
                         break;
@@ -371,7 +356,8 @@ namespace Shadow {
                     }
 
                     if (res.best_move == 0) {
-                        MoveList moves = get_legal_moves(pos);
+                        MoveList moves;
+                        generate_moves(pos, moves);
                         if (moves.size == 0) {
                             if (in_check(pos, pos.side_to_move()))
                                 result = (pos.side_to_move() == WHITE) ? 0 : 2;

@@ -149,7 +149,7 @@ namespace Shadow::Bench {
                     if (!line.empty()) {
                         fens.push_back(line);
 
-                        if (fens.size() >= 3000000) {
+                        if (fens.size() >= 30000000) {
                             break;
                         }
                     }
