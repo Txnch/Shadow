@@ -8,6 +8,7 @@
 #include "uci.h"
 #include "timeman.h"
 #include "datagen.h"
+#include "lookup.h"
 
 
 int main(int argc, char* argv[])
@@ -17,6 +18,7 @@ int main(int argc, char* argv[])
         init_attacks();
         init_magic();
         init_zobrist();
+        Cuckoo::init();
 
         const bool nnueLoaded = nnue::init("quantised.bin");
         if (nnueLoaded) {

@@ -48,6 +48,8 @@ public:
     bool is_legal(Move m) const;
     bool is_pseudo_legal(Move m) const;
     bool is_repetition_draw(int ply_from_root) const;
+    bool has_upcoming_repetition(int ply_from_root) const;
+
     Color side_to_move() const { return side; }
     Square ep_square()   const { return ep; }
     int castling()       const { return castling_right; }

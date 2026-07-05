@@ -510,23 +510,21 @@ static MovePicker::MainOrderData build_main_order_data(const SearchStack* ss, in
     MovePicker::MainOrderData data{};
     data.history = search_state.history_heuristic;
     data.capture_history = search_state.capture_history;
+
     if (!ss || ply < 1)
         return data;
-
     const SearchStack& prev1 = ss[ply - 1];
     if (prev1.current_move && prev1.moved_piece != NO_PIECE)
         data.cont1 = search_state.cont_history[prev1.moved_piece][to_sq(prev1.current_move)];
 
     if (ply < 2)
         return data;
-
     const SearchStack& prev2 = ss[ply - 2];
     if (prev2.current_move && prev2.moved_piece != NO_PIECE)
         data.cont2 = search_state.cont_history[prev2.moved_piece][to_sq(prev2.current_move)];
 
     if (ply < 4)
         return data;
-
     const SearchStack& prev4 = ss[ply - 4];
     if (prev4.current_move && prev4.moved_piece != NO_PIECE)
         data.cont4 = search_state.cont_history[prev4.moved_piece][to_sq(prev4.current_move)];
@@ -645,6 +643,16 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     bool inChk = in_check(pos, pos.side_to_move());
     if (is_immediate_draw(pos, ply, inChk))
         return draw_score();
+
+
+    if (alpha < draw_score() && pos.has_upcoming_repetition(ply))
+    {
+        alpha = draw_score();
+        if (alpha >= beta) {
+            return alpha;
+        }
+    }
+
 
     if (ply >= QS_MAX_PLY_GUARD)
         return inChk ? draw_score() : eval_from_stack(pos, ss, ply);
@@ -806,6 +814,16 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         return draw_score();
     }
 
+
+    if (!isRoot && alpha < draw_score() && pos.has_upcoming_repetition(ply))
+    {
+        alpha = draw_score();
+        if (alpha >= beta) {
+            return alpha;
+        }
+    }
+
+
     alpha = std::max(alpha, -MATE_SCORE + ply);
     beta = std::min(beta, MATE_SCORE - ply - 1);
     if (alpha >= beta) return alpha;
@@ -850,6 +868,8 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
     if (depth <= 0 && !inChk)
         return qsearch(pos, alpha, beta, ply, ss);
+
+
 
     // IIR
     if (!isRoot && depth >= 4 && tt_move == 0 && ss[ply].excluded_move == 0) {

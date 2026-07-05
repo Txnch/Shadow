@@ -1,6 +1,7 @@
 #include "position.h"
 #include "bitboard.h"
 #include "nnue.h"
+#include "lookup.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1183,4 +1184,54 @@ Bitboard Position::attacks_by(Color c, PieceType pt) const {
     }
 
     return attacks;
+}
+
+bool Position::has_upcoming_repetition(int ply_from_root) const
+{
+    const int maxDist = std::min(
+        halfmove_clock_state,
+        last_null_ply >= 0 ? ply - 1 - last_null_ply : ply);
+
+    if (maxDist < 3)
+        return false;
+
+    const uint64_t currentKey = hash_key;
+    uint64_t other = currentKey ^ history[ply - 1].hash_key ^ zobrist_side;
+
+    for (int d = 3; d <= maxDist; d += 2)
+    {
+        const uint64_t oldKey = history[ply - d].hash_key;
+
+        other ^= history[ply - (d - 1)].hash_key
+            ^ oldKey
+            ^ zobrist_side;
+
+        if (other != 0)
+            continue;
+
+        const uint64_t keyDelta = currentKey ^ oldKey;
+
+        int slot = Cuckoo::h1(keyDelta);
+        if (Cuckoo::keys[slot] != keyDelta)
+            slot = Cuckoo::h2(keyDelta);
+
+        if (Cuckoo::keys[slot] != keyDelta)
+            continue;
+
+        Move move = Cuckoo::moves[slot];
+
+        if ((BetweenBB[from_sq(move)][to_sq(move)] & occ_all) != BB_EMPTY)
+            continue;
+
+        if (ply_from_root >= d)
+            return true;
+
+        for (int i = d + 4; i <= maxDist; i += 2)
+        {
+            if (history[ply - i].hash_key == oldKey)
+                return true;
+        }
+    }
+
+    return false;
 }
