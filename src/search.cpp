@@ -337,11 +337,6 @@ void clear_search_state_for_new_game()
     tm.reset();
 }
 
-static int total_pieces(const Position& pos)
-{
-    return popcount(pos.pieces(WHITE) | pos.pieces(BLACK));
-}
-
 static bool has_non_pawn_material(const Position& pos, Color c)
 {
     return (pos.pieces(c) & ~(pos.pieces(PAWN) | pos.pieces(KING))) != 0;
@@ -885,16 +880,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         const int correction = get_eval_correction(pos, ss, ply);
         staticEval += correction;
         corrplexity = std::abs(correction);
-
-        if (pos.pieces(PAWN) == 0 && std::abs(staticEval) < MATE_SCORE - 1000) {
-            int nonPawnMat = total_pieces(pos);
-            if (nonPawnMat <= 3) {
-                staticEval /= 2;
-            }
-            else if (nonPawnMat <= 5) {
-                staticEval = (staticEval * 3) / 4;
-            }
-        }
 
         staticEval = clamp_eval_score(staticEval);
     }
