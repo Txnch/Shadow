@@ -100,21 +100,25 @@ void TimeManager::set_limits(bool infinite,
 }
 
 void TimeManager::compute_time() {
-    const int available_time = std::max(0, time_left - move_overhead);
+    const int mtg = (moves_to_go > 0) ? std::min(moves_to_go, 50) : 50;
 
-    if (available_time <= 0) {
-        optimum_time = maximum_time = 1;
-        return;
+    const double projected_time = std::max(1.0,
+        double(time_left) + double(increment) * (mtg - 1) - double(move_overhead) * (2 + mtg)
+    );
+
+    double opt_scale;
+
+    if (moves_to_go == 0) {
+        opt_scale = std::min(0.025, 0.214 * double(time_left) / projected_time);
+    }
+    else {
+        opt_scale = std::min(0.95 / mtg, 0.88 * double(time_left) / projected_time);
     }
 
-    const int default_mtg = increment > 0 ? 35 : 45;
-    const int mtg = (moves_to_go > 0 ? moves_to_go : default_mtg) + 5;
-    const int soft = (available_time - increment) / std::max(1, mtg) + increment * 3 / 4;
-    const int hard = available_time / 2;
-
-    base_optimum_time = std::clamp(soft, 1, std::max(1, hard));
+    base_optimum_time = std::max(1, int(opt_scale * projected_time));
     optimum_time = base_optimum_time;
-    maximum_time = std::max(1, hard);
+
+    maximum_time = std::max(1, int(time_left * 0.8) - move_overhead);
 }
 
 void TimeManager::update_after_iteration(int depth,
