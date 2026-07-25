@@ -94,6 +94,7 @@ static thread_local SearchThreadState search_state;
 static thread_local TimeManager tm;
 static thread_local std::unique_ptr<SearchMoveBuffer[]> search_move_buffers;
 static thread_local bool suppress_search_output = false;
+static thread_local int ply_reduction[MAX_PLY + 4] = { 0 };
 static thread_local std::atomic<uint64_t> fallback_search_node_counter{ 0 };
 static thread_local std::atomic<uint64_t>* search_node_counter = nullptr;
 static thread_local SearchNodeTotalFn total_search_nodes_fn = nullptr;
@@ -333,6 +334,7 @@ void clear_search_state_for_new_game()
     std::fill(&search_state.pawn_corr[0][0], &search_state.pawn_corr[0][0] + 2 * CORR_SIZE, 0);
     std::fill(&search_state.non_pawn_corr[0][0][0], &search_state.non_pawn_corr[0][0][0] + 4 * CORR_SIZE, 0);
     std::fill(&search_state.cont_corr[0][0], &search_state.cont_corr[0][0] + PIECE_NB * 64, 0);
+    std::fill(ply_reduction, ply_reduction + MAX_PLY + 4, 0);
 
     tm.reset();
 }
@@ -891,6 +893,8 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     // Improving
     bool improving = false;
     bool rfp_improving = !inChk;
+    bool opponent_worsening = false;
+
     if (!inChk) {
         if (ply >= 2 && ss[ply - 2].static_eval != -INF) {
             improving = staticEval > ss[ply - 2].static_eval;
@@ -899,6 +903,23 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         else if (ply >= 4 && ss[ply - 4].static_eval != -INF) {
             improving = staticEval > ss[ply - 4].static_eval;
             rfp_improving = improving;
+        }
+
+        if (ply >= 1 && ss[ply - 1].static_eval != -INF) {
+            opponent_worsening = staticEval + ss[ply - 1].static_eval > 1;
+        }
+    }
+
+    // Hindsight
+    int prior_reduction = (ply > 0) ? ply_reduction[ply - 1] : 0;
+    if (!inChk && ss[ply].excluded_move == 0) {
+        if (prior_reduction >= 3 && !opponent_worsening) {
+            depth++;
+        }
+        if (prior_reduction >= 2 && depth >= 2 && ss[ply].static_eval != -INF && ply >= 1 && ss[ply - 1].static_eval != -INF) {
+            if (ss[ply].static_eval + ss[ply - 1].static_eval > 173) {
+                depth--;
+            }
         }
     }
 
@@ -1265,7 +1286,9 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
 
             if (R > 0) {
+                ply_reduction[ply] = R;
                 score = -negamax<NonPV>(pos, searchedDepth - R, -(alpha + 1), -alpha, ply + 1, ss, true, true);
+                ply_reduction[ply] = 0;
 
 
                 if (score > alpha) {
