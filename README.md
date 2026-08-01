@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" width="350">
+  <img src="logo.jpg" width="350">
 </p>
 
 # Shadow
