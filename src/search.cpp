@@ -344,7 +344,6 @@ static bool has_non_pawn_material(const Position& pos, Color c)
     return (pos.pieces(c) & ~(pos.pieces(PAWN) | pos.pieces(KING))) != 0;
 }
 
-// Insufficient Material
 bool has_insufficient_material(const Position& pos)
 {
     if (pos.pieces(PAWN) || pos.pieces(ROOK) || pos.pieces(QUEEN))
@@ -984,7 +983,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
 
-        // ProbCut
+         // ProbCut
         if (!inChk && depth >= 5 && std::abs(beta) < MATE_SCORE - MAX_PLY && ss[ply].excluded_move == 0)
         {
             int probcut_beta = beta + 160 - 40 * (improving ? 1 : 0);
@@ -1134,7 +1133,15 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         }
 
         if (!isRoot && depth <= 8 && !inChk) {
-            int see_threshold = isQuiet ? -50 * depth : -100 * depth;
+            int see_threshold;
+
+            if (isQuiet) {
+                int lmr_depth = futility_lmr_depth(depth, moveCount, ss[ply].tt_pv);
+                
+                see_threshold = -21 * lmr_depth * lmr_depth;
+            } else {
+                see_threshold = -96 * depth;
+            }
 
             if (!movepick_see_ge(pos, m, see_threshold)) {
                 pruned_or_skipped_move = true;
