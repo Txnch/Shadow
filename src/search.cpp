@@ -868,8 +868,10 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
 
     // IIR
-    if (!isRoot && depth >= 4 && tt_move == 0 && ss[ply].excluded_move == 0) {
-        depth--;
+    if (tt_move == 0 && !isRoot) {
+        if ((isPV && depth >= 2) || (cutNode && depth >= 4)) {
+            depth--;
+        }
     }
 
     int raw_eval = tt_hit ? tt_static_eval : eval_from_stack(pos, ss, ply);
