@@ -1101,8 +1101,14 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         int hist_score = 0;
         if (isQuiet) {
             const Square to = to_sq(m);
-            hist_score = search_state.history_heuristic[from_sq(m)][to]
-                + continuation_history_score(ss, ply, movedPiece, to);
+            int cont_hist = continuation_history_score(ss, ply, movedPiece, to);
+
+            if (!isRoot && cont_hist < -4000 * depth) {
+                pruned_or_skipped_move = true;
+                continue;
+            }
+
+            hist_score = cont_hist + search_state.history_heuristic[from_sq(m)][to];
         }
         else {
             hist_score = capture_history_score(pos, m);
