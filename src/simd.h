@@ -158,4 +158,45 @@ namespace shadow_simd {
 #endif
     }
 
+    static inline void refresh_accumulator(int16_t* out_acc, const int16_t* biases, const int16_t* weights, const int* active_features, int num_features, std::size_t hidden_size) {
+#if defined(__AVX2__) || defined(_M_AVX2)
+        std::size_t i = 0;
+        const std::size_t n32 = hidden_size & ~std::size_t(31);
+
+        for (; i < n32; i += 32) {
+            __m256i acc0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(biases + i));
+            __m256i acc1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(biases + i + 16));
+
+            for (int f = 0; f < num_features; ++f) {
+                const std::size_t offset = static_cast<std::size_t>(active_features[f]) * hidden_size + i;
+
+                __m256i w0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + offset));
+                __m256i w1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + offset + 16));
+
+                acc0 = _mm256_add_epi16(acc0, w0);
+                acc1 = _mm256_add_epi16(acc1, w1);
+            }
+
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_acc + i), acc0);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_acc + i + 16), acc1);
+        }
+
+        for (; i < hidden_size; ++i) {
+            int16_t sum = biases[i];
+            for (int f = 0; f < num_features; ++f) {
+                sum += weights[static_cast<std::size_t>(active_features[f]) * hidden_size + i];
+            }
+            out_acc[i] = sum;
+        }
+#else
+        for (std::size_t i = 0; i < hidden_size; ++i) {
+            int16_t sum = biases[i];
+            for (int f = 0; f < num_features; ++f) {
+                sum += weights[static_cast<std::size_t>(active_features[f]) * hidden_size + i];
+            }
+            out_acc[i] = sum;
+        }
+#endif
+    }
+
 } // namespace shadow_simd

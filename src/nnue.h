@@ -39,15 +39,14 @@ namespace nnue {
 
     void refresh_pair(const Position& pos, AccumulatorPair& pair);
     void refresh_acc(const Position& pos, Color pov, int16_t out_acc[HIDDEN]);
-
-    int feature_index_stm_manual(Color pov, Piece pc, Square sq);
+    int feature_index_stm_manual(Color pov, Square ksq, Piece pc, Square sq);
 
     void add_feature(int16_t acc[HIDDEN], int feat_idx);
     void sub_feature(int16_t acc[HIDDEN], int feat_idx);
     void add_sub_feature(int16_t acc[HIDDEN], int add_feat_idx, int sub_feat_idx);
-
     void apply_dirty(int16_t acc[HIDDEN],
         Color pov,
+        Square ksq,
         const DirtyPieces& dp);
 
 }

@@ -39,7 +39,7 @@ namespace nnue {
     static constexpr int QA = 255;
     static constexpr int QB = 64;
     static constexpr int BUCKET_DIVISOR = 4;
-    static constexpr int NETWORK_SCALE = 304;
+    static constexpr int NETWORK_SCALE = 306;
 
     enum class LoadSource {
         None,
@@ -200,17 +200,19 @@ namespace nnue {
         return static_cast<int>(pt) - static_cast<int>(PAWN);
     }
 
-    static inline Square orient_square(Color pov, Square sq) {
-        if (pov == BLACK)
-            sq = Square(int(sq) ^ 56);
-        return sq;
+    static inline Square orient_square_hm(Color pov, Square ksq, Square sq) {
+        const int color_mask = pov * 56;
+        const int oriented_ksq = int(ksq) ^ color_mask;
+        const int file_mask = ((oriented_ksq & 4) >> 2) * 7;
+
+        return Square(int(sq) ^ color_mask ^ file_mask);
     }
 
-    static inline int feature_index_stm(Color pov, Piece pc, Square sq) {
+    static inline int feature_index_stm(Color pov, Square ksq, Piece pc, Square sq) {
         if (pc == NO_PIECE || sq < SQ_A1 || sq > SQ_H8)
             return -1;
 
-        sq = orient_square(pov, sq);
+        sq = orient_square_hm(pov, ksq, sq);
 
         const int ptIdx = piece_type_index(piece_type(pc));
         if (ptIdx < 0)
@@ -275,8 +277,8 @@ namespace nnue {
             return evaluate_from_pair(base_pair, pos);
 
         AccumulatorPair adjusted = base_pair;
-        sub_feature(adjusted.white, feature_index_stm(WHITE, pc, sq));
-        sub_feature(adjusted.black, feature_index_stm(BLACK, pc, sq));
+        sub_feature(adjusted.white, feature_index_stm(WHITE, pos.king_square(WHITE), pc, sq));
+        sub_feature(adjusted.black, feature_index_stm(BLACK, pos.king_square(BLACK), pc, sq));
 
         return evaluate_from_pair_impl(adjusted, pos.side_to_move(), popcount(pos.all_pieces()) - 3);
     }
@@ -315,8 +317,8 @@ namespace nnue {
         return g_ready && g_load_source == LoadSource::Embedded;
     }
 
-    int feature_index_stm_manual(Color pov, Piece pc, Square sq) {
-        return feature_index_stm(pov, pc, sq);
+    int feature_index_stm_manual(Color pov, Square ksq, Piece pc, Square sq) {
+        return feature_index_stm(pov, ksq, pc, sq);
     }
 
     void refresh_pair(const Position& pos, AccumulatorPair& pair) {
@@ -329,17 +331,22 @@ namespace nnue {
             std::fill_n(out_acc, HIDDEN, int16_t(0));
             return;
         }
+        int active_features[64];
+        int num_features = 0;
 
-        shadow_simd::copy_i16(out_acc, g_b1, HIDDEN);
-
+        const Square ksq = pos.king_square(pov);
         Bitboard occ = pos.all_pieces();
+
         while (occ) {
             const Square sq = pop_lsb(occ);
             const Piece pc = pos.piece_on(sq);
-            const int idx = feature_index_stm(pov, pc, sq);
-            if (idx >= 0)
-                shadow_simd::add_i16(out_acc, w1_row(idx), HIDDEN);
+            const int idx = feature_index_stm(pov, ksq, pc, sq);
+            if (idx >= 0 && num_features < 64) {
+                active_features[num_features++] = idx;
+            }
         }
+
+        shadow_simd::refresh_accumulator(out_acc, g_b1, g_W1, active_features, num_features, HIDDEN);
     }
 
     void add_feature(int16_t acc[HIDDEN], int feat_idx) {
@@ -372,12 +379,12 @@ namespace nnue {
             shadow_simd::sub_i16(acc, w1_row(sub_feat_idx), HIDDEN);
     }
 
-    void apply_dirty(int16_t acc[HIDDEN], Color pov, const DirtyPieces& dp) {
+    void apply_dirty(int16_t acc[HIDDEN], Color pov, Square ksq, const DirtyPieces& dp) {
         if (!g_ready)
             return;
 
         auto feat_idx = [&](const DirtyPiece& d) {
-            return feature_index_stm(pov, d.pc, d.sq);
+            return feature_index_stm(pov, ksq, d.pc, d.sq);
             };
 
         add_sub_feature(acc, feat_idx(dp.add0), feat_idx(dp.sub0));

@@ -538,6 +538,25 @@ static inline void ensure_accumulator(const Position& pos, SearchStack* ss, int 
     while (valid_ply >= 0 && !ss[valid_ply].acc_valid)
         --valid_ply;
 
+    if (valid_ply >= 0) {
+        bool need_full_refresh = false;
+        for (int i = valid_ply; i < ply; ++i) {
+            int hist_idx = pos.current_ply() - (ply - i);
+            const nnue::DirtyPieces& dp = pos.state_at_ply(hist_idx).dp;
+
+            if (dp.sub0.pc != NO_PIECE && piece_type(dp.sub0.pc) == KING) {
+                if ((int(dp.sub0.sq) ^ int(dp.add0.sq)) & 4) {
+                    need_full_refresh = true;
+                    break;
+                }
+            }
+        }
+
+        if (need_full_refresh) {
+            valid_ply = -1;
+        }
+    }
+
     if (valid_ply < 0) {
         nnue::refresh_acc(pos, WHITE, ss[ply].acc.white);
         nnue::refresh_acc(pos, BLACK, ss[ply].acc.black);
@@ -545,14 +564,16 @@ static inline void ensure_accumulator(const Position& pos, SearchStack* ss, int 
         return;
     }
 
+    Square wk_sq = pos.king_square(WHITE);
+    Square bk_sq = pos.king_square(BLACK);
+
     for (int i = valid_ply; i < ply; ++i) {
         ss[i + 1].acc = ss[i].acc;
 
         int hist_idx = pos.current_ply() - (ply - i);
         const nnue::DirtyPieces& dp = pos.state_at_ply(hist_idx).dp;
-
-        nnue::apply_dirty(ss[i + 1].acc.white, WHITE, dp);
-        nnue::apply_dirty(ss[i + 1].acc.black, BLACK, dp);
+        nnue::apply_dirty(ss[i + 1].acc.white, WHITE, wk_sq, dp);
+        nnue::apply_dirty(ss[i + 1].acc.black, BLACK, bk_sq, dp);
         ss[i + 1].acc_valid = true;
     }
 }
