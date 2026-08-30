@@ -655,12 +655,11 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         update_hard_time();
 
     if (search_stop_requested())
-        return alpha;
+        return 0;
 
     bool inChk = in_check(pos, pos.side_to_move());
     if (is_immediate_draw(pos, ply, inChk))
         return draw_score();
-
 
     if (alpha < draw_score() && pos.has_upcoming_repetition(ply))
     {
@@ -670,22 +669,22 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         }
     }
 
-
     if (ply >= QS_MAX_PLY_GUARD)
         return inChk ? draw_score() : eval_from_stack(pos, ss, ply);
-
 
     search_state.pv_length[ply] = 0;
     int original_alpha = alpha;
     Move best_move = 0;
 
     uint64_t key = pos.hash();
-    Move q_tt_move = 0;
     TTEntry* qtt = tt_probe(key);
+
+    Move q_tt_move = 0;
     int q_tt_score = 0;
     int q_tt_static_eval = 0;
     TTFlag q_tt_flag = TT_ALPHA;
     bool has_q_tt_score = false;
+
     if (qtt) {
         q_tt_move = qtt->best_move;
         q_tt_score = score_from_tt(qtt->score, ply, pos.halfmove_clock());
@@ -703,29 +702,41 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         }
     }
 
-    int stand_pat = -INF;
     int raw_eval = -INF;
-    if (!inChk)
-    {
-        raw_eval = qtt ? q_tt_static_eval : eval_from_stack(pos, ss, ply);
-        stand_pat = scale_rule50_eval(raw_eval, pos) + get_eval_correction(pos, ss, ply);
+    int best_score = -INF;
 
+    if (!inChk) {
+        raw_eval = has_q_tt_score ? q_tt_static_eval : eval_from_stack(pos, ss, ply);
+        int stand_pat = scale_rule50_eval(raw_eval, pos) + get_eval_correction(pos, ss, ply);
         stand_pat = clamp_eval_score(stand_pat);
 
         ss[ply].static_eval = stand_pat;
-
         if (has_q_tt_score) {
-            if ((q_tt_flag == TT_BETA && q_tt_score > stand_pat)
-                || (q_tt_flag == TT_ALPHA && q_tt_score < stand_pat)
-                || q_tt_flag == TT_EXACT)
+            if (q_tt_flag == TT_EXACT) {
                 stand_pat = q_tt_score;
+            }
+            else if (q_tt_flag == TT_ALPHA && q_tt_score < stand_pat) {
+                stand_pat = q_tt_score;
+            }
+            else if (q_tt_flag == TT_BETA && q_tt_score > stand_pat) {
+                stand_pat = q_tt_score;
+            }
         }
 
-        if (stand_pat >= beta) {
-            tt_store(key, 0, score_to_tt(stand_pat, ply), TT_BETA, 0, raw_eval);
-            return beta;
+        best_score = stand_pat;
+        if (best_score >= beta) {
+            if (std::abs(best_score) < MATE_SCORE - 1000 && std::abs(beta) < MATE_SCORE - 1000) {
+                best_score = (best_score + beta) / 2;
+            }
+            if (!has_q_tt_score) {
+                tt_store(key, 0, score_to_tt(best_score, ply), TT_BETA, 0, raw_eval);
+            }
+            return best_score;
         }
-        if (stand_pat > alpha) alpha = stand_pat;
+
+        if (best_score > alpha) {
+            alpha = best_score;
+        }
     }
 
     MovePicker picker;
@@ -736,15 +747,13 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     for (Move m = picker.next(false); m; m = picker.next(false))
     {
         Piece movedPiece = pos.piece_on(from_sq(m));
-
         bool isQuiet = !is_capture(m) && !is_promotion(m);
 
         if (!inChk && isQuiet) {
             continue;
         }
-
-        if (!inChk && is_capture(m) && !is_promotion(m)) {
-            const int futility_value = stand_pat + QS_FUTILITY_MARGIN + qsearch_piece_value(captured_piece_for_move(pos, m));
+        if (!inChk && !isQuiet) {
+            const int futility_value = ss[ply].static_eval + QS_FUTILITY_MARGIN + qsearch_piece_value(captured_piece_for_move(pos, m));
             if (futility_value <= alpha && !movepick_see_ge(pos, m, 1)) {
                 continue;
             }
@@ -758,12 +767,11 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
             continue;
 
         ss[ply + 1].acc_valid = false;
-
         tt_prefetch(pos.hash());
+
         ss[ply].current_move = m;
         ss[ply].moved_piece = movedPiece;
         legal_moves++;
-
 
         search_state.pv_length[ply + 1] = 0;
 
@@ -771,41 +779,37 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         pos.undo_move();
 
         if (search_stop_requested())
-            return alpha;
+            return 0;
 
-        if (score >= beta) {
-            int store_score = beta;
-            tt_store(key, 0, score_to_tt(store_score, ply), TT_BETA, m, raw_eval);
+        if (score > best_score) {
+            best_score = score;
 
-            return beta;
+            if (score > alpha) {
+                alpha = score;
+                best_move = m;
+                search_state.pv_table[ply][0] = m;
+                int child_len = search_state.pv_length[ply + 1];
+                if (child_len < 0 || child_len > MAX_PLY - ply - 1) child_len = 0;
+                for (int j = 0; j < child_len; ++j)
+                    search_state.pv_table[ply][j + 1] = search_state.pv_table[ply + 1][j];
+                search_state.pv_length[ply] = child_len + 1;
+            }
+            if (score >= beta) {
+                break; 
+            }
         }
-        if (score > alpha) {
-            alpha = score;
-            best_move = m;
-
-
-            search_state.pv_table[ply][0] = m;
-            int child_len = search_state.pv_length[ply + 1];
-            if (child_len < 0 || child_len > MAX_PLY - ply - 1) child_len = 0;
-            for (int j = 0; j < child_len; ++j)
-                search_state.pv_table[ply][j + 1] = search_state.pv_table[ply + 1][j];
-            search_state.pv_length[ply] = child_len + 1;
-        }
-
-
     }
 
     if (inChk && legal_moves == 0)
         return -MATE_SCORE + ply;
+    if (best_score >= beta && std::abs(best_score) < MATE_SCORE - 1000 && std::abs(beta) < MATE_SCORE - 1000) {
+        best_score = (best_score + beta) / 2;
+    }
+    TTFlag flag = (best_score >= beta) ? TT_BETA : TT_ALPHA;
 
+    tt_store(key, 0, score_to_tt(best_score, ply), flag, best_move, raw_eval);
 
-    TTFlag flag;
-    if (alpha <= original_alpha) flag = TT_ALPHA;
-    else flag = TT_EXACT;
-
-    tt_store(key, 0, score_to_tt(alpha, ply), flag, best_move, raw_eval);
-
-    return alpha;
+    return best_score;
 }
 
 
