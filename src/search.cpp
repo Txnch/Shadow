@@ -1165,7 +1165,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
 
-        if (!isRoot && depth <= 8 && !inChk) {
+        if (!isRoot && !inChk && best_score > -MAX_EVAL_SCORE && has_non_pawn_material(pos, pos.side_to_move())) {
             int see_threshold;
 
             if (isQuiet) {
