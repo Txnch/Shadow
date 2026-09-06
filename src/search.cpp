@@ -41,6 +41,8 @@ inline constexpr int RFP_QUAD_MARGIN = 7;
 inline constexpr int RFP_IMPROVING_MARGIN = 74;
 inline constexpr int RFP_CORRPLEXITY_SCALE = 63;
 inline constexpr int RFP_FAIL_FIRM_T = 700;
+inline constexpr int SEE_QUIET = -21;
+inline constexpr int SEE_NOISY = -96;
 
 inline constexpr int ROOT_ASPIRATION_DEPTH = 3;
 inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
@@ -1142,7 +1144,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         const bool givesChk = pos.gives_check(m);
 
         // LMP
-        if (!isRoot && !inChk && isQuiet && depth <= 8 && std::abs(alpha) < MATE_SCORE - MAX_PLY && moveCount > 0) {
+        if (!isRoot && !inChk && isQuiet && best_score > -MAX_EVAL_SCORE) {
             int lmp_threshold = (3 + depth * depth) / (improving ? 1 : 2);
             lmp_threshold += (hist_score * LMP_HISTORY_SCALE) / 8388608;
             if (moveCount >= lmp_threshold) {
@@ -1171,9 +1173,9 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             if (isQuiet) {
                 int lmr_depth = futility_lmr_depth(depth, moveCount, ss[ply].tt_pv);
                 
-                see_threshold = -21 * lmr_depth * lmr_depth;
+                see_threshold = SEE_QUIET * lmr_depth * lmr_depth;
             } else {
-                see_threshold = -96 * depth;
+                see_threshold = SEE_NOISY * depth;
             }
 
             if (!movepick_see_ge(pos, m, see_threshold)) {
