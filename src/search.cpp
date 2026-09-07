@@ -43,6 +43,9 @@ inline constexpr int RFP_CORRPLEXITY_SCALE = 63;
 inline constexpr int RFP_FAIL_FIRM_T = 700;
 inline constexpr int SEE_QUIET = -21;
 inline constexpr int SEE_NOISY = -96;
+inline constexpr int NMP_DEPTH_MUL = 30;
+inline constexpr int NMP_BASE = 150;
+inline constexpr int NMP_DIV = 200;
 
 inline constexpr int ROOT_ASPIRATION_DEPTH = 3;
 inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
@@ -974,9 +977,15 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         // NMP
         bool prev_is_null = (ply > 0 && ss[ply - 1].current_move == 0);
 
-        if (cutNode && allow_nmp && !inChk && !prev_is_null && ss[ply].excluded_move == 0 && depth >= 4 && ply >= search_state.nmp_min_ply && !(tt_hit && tt_flag == TT_ALPHA && tt_score < beta) && staticEval >= beta && staticEval < 10000 && has_non_pawn_material(pos, pos.side_to_move()))
+        if (cutNode && allow_nmp && !inChk && !prev_is_null && ss[ply].excluded_move == 0
+            && !(tt_hit && tt_flag == TT_ALPHA && tt_score < beta)
+            && !is_decisive_score(beta)
+            && ply >= search_state.nmp_min_ply
+            && staticEval >= beta
+            && has_non_pawn_material(pos, pos.side_to_move())
+            && staticEval + NMP_DEPTH_MUL * depth - NMP_BASE >= beta)
         {
-            int R = 3 + depth / 3 + std::min(2, (staticEval - beta) / 200);
+            int R = 3 + depth / 3 + std::min(2, (staticEval - beta) / NMP_DIV);
             R = std::min(R, depth);
 
             ss[ply].current_move = 0;
