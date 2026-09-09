@@ -1275,87 +1275,63 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             int R = 0;
 
             // LMR
-            if (depth >= 3 && moveCount > (isPV ? 3 : 1) && !inChk && ext == 0)
+            if (depth >= 3 && moveCount > (isPV ? 3 : 1) && ext == 0)
             {
                 int d = std::min(depth, 63);
                 int c = std::min(moveCount, 255);
-
                 int R_scaled = LMR_TABLE[isQuiet ? 1 : 0][d][c];
 
-                if constexpr (isPV) R_scaled -= 1 * LMR_SCALE;
+                if constexpr (isPV) R_scaled -= LMR_SCALE;
+                if (ss[ply].tt_pv)  R_scaled -= LMR_SCALE;
+                if (!improving)     R_scaled += LMR_SCALE;
+                if (cutNode)        R_scaled += (ss[ply].tt_pv ? 1 : 2) * LMR_SCALE;
+                if (givesChk)       R_scaled -= LMR_CHECK_REDUCTION;
 
-                if (ss[ply].tt_pv) {
-                    R_scaled -= 1 * LMR_SCALE;
+                if (inChk) {
+                    R_scaled -= LMR_SCALE;
                 }
 
                 if (tt_hit && tt_depth >= depth) {
-                    R_scaled -= 1 * LMR_SCALE;
+                    R_scaled -= LMR_SCALE;
                 }
-
                 if (tt_move != 0 && (is_capture(tt_move) || is_promotion(tt_move))) {
-                    R_scaled += 1 * LMR_SCALE;
+                    R_scaled += LMR_SCALE;
                 }
-
-
                 if (isQuiet) {
-
                     int hist_modifier = (hist_score * LMR_SCALE) / 8192;
                     R_scaled -= std::clamp(hist_modifier, -3 * LMR_SCALE, 3 * LMR_SCALE);
 
-
                     if (m == search_state.killer_moves[0][ply] || m == search_state.killer_moves[1][ply]) {
-                        R_scaled -= 1 * LMR_SCALE;
+                        R_scaled -= LMR_SCALE;
                     }
 
                     if (ply >= 1 && ss[ply - 1].current_move != 0) {
                         Move prev = ss[ply - 1].current_move;
                         if (m == search_state.countermove[from_sq(prev)][to_sq(prev)]) {
-                            R_scaled -= 1 * LMR_SCALE;
+                            R_scaled -= LMR_SCALE;
                         }
                     }
                 }
                 else {
-
                     int hist_modifier = (hist_score * LMR_SCALE) / 16384;
                     R_scaled -= std::clamp(hist_modifier, -2 * LMR_SCALE, 2 * LMR_SCALE);
                 }
 
-                if (!improving) {
-                    R_scaled += 1 * LMR_SCALE;
-                }
-
-                if (cutNode) {
-                    R_scaled += (ss[ply].tt_pv ? 1 : 2) * LMR_SCALE;
-                }
-
-                if (givesChk) {
-                    R_scaled -= LMR_CHECK_REDUCTION;
-                }
-
-                R = R_scaled / LMR_SCALE;
-                R = std::clamp(R, 0, searchedDepth - 1);
+                R = std::clamp(R_scaled / LMR_SCALE, 0, searchedDepth - 1);
             }
 
             if (R > 0) {
                 ply_reduction[ply] = R;
                 score = -negamax<NonPV>(pos, searchedDepth - R, -(alpha + 1), -alpha, ply + 1, ss, true, true);
                 ply_reduction[ply] = 0;
-
-
                 if (score > alpha) {
-                    int new_depth = searchedDepth;
-
-                    if (score > alpha + 50) {
-                        new_depth += 1;
-                    }
-
+                    int new_depth = searchedDepth + (score > alpha + 50 ? 1 : 0);
                     score = -negamax<NonPV>(pos, new_depth, -(alpha + 1), -alpha, ply + 1, ss, true, !cutNode);
                 }
             }
             else {
                 score = -negamax<NonPV>(pos, searchedDepth, -(alpha + 1), -alpha, ply + 1, ss, true, !cutNode);
             }
-
             if constexpr (isPV) {
                 if (score > alpha && score < beta) {
                     search_state.pv_length[ply + 1] = 0;
