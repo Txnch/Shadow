@@ -70,7 +70,6 @@ inline constexpr uint64_t SEARCH_POLL_MASK = 4095ULL;
 
 static int LMR_TABLE[2][64][256];
 
-
 static int init_lmr_table = []() {
     for (int d = 1; d < 64; ++d) {
         for (int m = 1; m < 256; ++m) {
