@@ -267,6 +267,9 @@ namespace Shadow {
                 std::atomic<uint64_t> positions_saved{ 0 };
                 std::atomic<uint64_t> opening_filter_rejected{ 0 };
                 std::atomic<bool> write_failed{ false };
+                std::atomic<int> wdl_white_wins{ 0 };
+                std::atomic<int> wdl_draws{ 0 };
+                std::atomic<int> wdl_black_wins{ 0 };
                 std::chrono::steady_clock::time_point start_time{};
                 int target_games = 0;
             };
@@ -476,9 +479,13 @@ namespace Shadow {
                 const double games_per_second = elapsed.count() > 0.0
                     ? double(completed) / elapsed.count()
                     : 0.0;
+                int ww = shared.wdl_white_wins.load(std::memory_order_relaxed);
+                int d = shared.wdl_draws.load(std::memory_order_relaxed);
+                int bw = shared.wdl_black_wins.load(std::memory_order_relaxed);
 
                 std::lock_guard<std::mutex> lock(shared.log_mutex);
                 std::cerr << "Played: " << completed
+                    << " games | W/D/L: " << ww << "/" << d << "/" << bw
                     << " games | Positions: " << shared.positions_saved.load(std::memory_order_relaxed)
                     << " | Filter rejects: " << shared.opening_filter_rejected.load(std::memory_order_relaxed)
                     << " | Speed: " << games_per_second << " games/s\n";
@@ -570,6 +577,15 @@ namespace Shadow {
                                 shared.write_failed.store(true, std::memory_order_relaxed);
                                 request_datagen_stop();
                                 break;
+                            }
+                            if (game.result == 2) {
+                                shared.wdl_white_wins.fetch_add(1, std::memory_order_relaxed);
+                            }
+                            else if (game.result == 1) {
+                                shared.wdl_draws.fetch_add(1, std::memory_order_relaxed);
+                            }
+                            else if (game.result == 0) {
+                                shared.wdl_black_wins.fetch_add(1, std::memory_order_relaxed);
                             }
                         }
 
@@ -703,7 +719,10 @@ namespace Shadow {
                 << shared.positions_saved.load(std::memory_order_relaxed)
                 << " ViriFormat positions to " << output_path << "\n";
             std::cerr << "Games generated: "
-                << shared.completed_games.load(std::memory_order_relaxed) << "\n";
+                << shared.completed_games.load(std::memory_order_relaxed)
+                << " (White: " << shared.wdl_white_wins.load(std::memory_order_relaxed)
+                << ", Draw: " << shared.wdl_draws.load(std::memory_order_relaxed)
+                << ", Black: " << shared.wdl_black_wins.load(std::memory_order_relaxed) << ")\n";
             std::cerr << "Opening filter rejected: "
                 << shared.opening_filter_rejected.load(std::memory_order_relaxed)
                 << " candidate games.\n";

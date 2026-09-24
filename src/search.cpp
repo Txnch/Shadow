@@ -549,7 +549,11 @@ static inline void ensure_accumulator(const Position& pos, SearchStack* ss, int 
             const nnue::DirtyPieces& dp = pos.state_at_ply(hist_idx).dp;
 
             if (dp.sub0.pc != NO_PIECE && piece_type(dp.sub0.pc) == KING) {
-                if ((int(dp.sub0.sq) ^ int(dp.add0.sq)) & 4) {
+                bool crossed_mirror = (int(dp.sub0.sq) ^ int(dp.add0.sq)) & 4;
+                Color pov = piece_color(dp.sub0.pc);
+                bool changed_bucket = nnue::get_king_bucket(pov, dp.sub0.sq) != nnue::get_king_bucket(pov, dp.add0.sq);
+
+                if (crossed_mirror || changed_bucket) {
                     need_full_refresh = true;
                     break;
                 }
@@ -562,8 +566,8 @@ static inline void ensure_accumulator(const Position& pos, SearchStack* ss, int 
     }
 
     if (valid_ply < 0) {
-        nnue::refresh_acc(pos, WHITE, ss[ply].acc.white);
-        nnue::refresh_acc(pos, BLACK, ss[ply].acc.black);
+        nnue::refresh_from_finny(pos, WHITE, ss[ply].acc.white);
+        nnue::refresh_from_finny(pos, BLACK, ss[ply].acc.black);
         ss[ply].acc_valid = true;
         return;
     }
@@ -1718,6 +1722,9 @@ SearchResult search(Position& pos,
     std::unique_ptr<SearchStack[]> ss_storage = std::make_unique<SearchStack[]>(MAX_PLY + 4);
     SearchStack* ss = ss_storage.get();
     initialize_search_stack(ss);
+    if (nnue::is_ready()) {
+        nnue::clear_finny_table();
+    }
     seed_root_accumulator(pos, ss);
 
     for (int i = 0; i < MAX_PLY; ++i) search_state.pv_length[i] = 0;

@@ -33,14 +33,6 @@
 #endif
 
 namespace nnue {
-
-    static constexpr uint32_t MAGIC = 0x45554E4Eu;
-    static constexpr uint32_t VERSION_V6_BUCKETED = 6;
-    static constexpr int QA = 255;
-    static constexpr int QB = 64;
-    static constexpr int BUCKET_DIVISOR = 4;
-    static constexpr int NETWORK_SCALE = 306;
-
     enum class LoadSource {
         None,
         Embedded,
@@ -207,20 +199,27 @@ namespace nnue {
 
         return Square(int(sq) ^ color_mask ^ file_mask);
     }
+    int get_king_bucket(Color pov, Square ksq) {
+        Square oriented_ksq = orient_square_hm(pov, ksq, ksq);
+        int ksq_rank = int(oriented_ksq) / 8;
+        int ksq_file = int(oriented_ksq) % 8;
+        return KingBuckets[ksq_rank * 4 + ksq_file];
+    }
 
     static inline int feature_index_stm(Color pov, Square ksq, Piece pc, Square sq) {
         if (pc == NO_PIECE || sq < SQ_A1 || sq > SQ_H8)
             return -1;
 
-        sq = orient_square_hm(pov, ksq, sq);
+        int bucket = get_king_bucket(pov, ksq);
 
+        sq = orient_square_hm(pov, ksq, sq);
         const int ptIdx = piece_type_index(piece_type(pc));
-        if (ptIdx < 0)
-            return -1;
+        if (ptIdx < 0) return -1;
 
         const int colorIdx = (piece_color(pc) == pov) ? 0 : 1;
         const int plane = colorIdx * 6 + ptIdx;
-        return plane * 64 + int(sq);
+
+        return (bucket * 768) + (plane * 64 + int(sq));
     }
 
     static inline const int16_t* w1_row(int feat_idx) {
@@ -319,6 +318,84 @@ namespace nnue {
 
     int feature_index_stm_manual(Color pov, Square ksq, Piece pc, Square sq) {
         return feature_index_stm(pov, ksq, pc, sq);
+    }
+
+    struct FinnyEntry {
+        Bitboard color_bb[COLOR_NB];
+        Bitboard type_bb[PIECE_TYPE_NB];
+        Piece board[64];
+        alignas(64) int16_t acc[HIDDEN];
+        bool active;
+    };
+
+    struct FinnyTable {
+        FinnyEntry white[8];
+        FinnyEntry black[8];
+    };
+
+    static thread_local FinnyTable t_finny;
+
+    static inline int get_king_config(Color pov, Square ksq) {
+        int bucket = get_king_bucket(pov, ksq);
+        int mirror = (ksq & 4) ? 1 : 0;
+        return (bucket << 1) | mirror;
+    }
+
+    void clear_finny_table() {
+        for (int i = 0; i < 8; ++i) {
+            t_finny.white[i].active = false;
+            t_finny.black[i].active = false;
+        }
+    }
+
+    void refresh_from_finny(const Position& pos, Color pov, int16_t out_acc[HIDDEN]) {
+        Square ksq = pos.king_square(pov);
+        int config = get_king_config(pov, ksq);
+        FinnyEntry& entry = (pov == WHITE) ? t_finny.white[config] : t_finny.black[config];
+
+        if (!entry.active) {
+            shadow_simd::copy_i16(entry.acc, g_b1, HIDDEN);
+            Bitboard occ = pos.all_pieces();
+            while (occ) {
+                Square sq = pop_lsb(occ);
+                Piece pc = pos.piece_on(sq);
+                int feat = feature_index_stm(pov, ksq, pc, sq);
+                if (feat >= 0) shadow_simd::add_i16(entry.acc, w1_row(feat), HIDDEN);
+            }
+            for (int i = 0; i < COLOR_NB; ++i) entry.color_bb[i] = pos.pieces(static_cast<Color>(i));
+            for (int i = PAWN; i <= KING; ++i) entry.type_bb[i] = pos.pieces(static_cast<PieceType>(i));
+            for (int s = 0; s < 64; ++s) entry.board[s] = pos.piece_on(Square(s));
+
+            entry.active = true;
+        }
+        else {
+            Bitboard diff = BB_EMPTY;
+            diff |= pos.pieces(WHITE) ^ entry.color_bb[WHITE];
+            diff |= pos.pieces(BLACK) ^ entry.color_bb[BLACK];
+            for (int i = PAWN; i <= KING; ++i) {
+                diff |= pos.pieces(static_cast<PieceType>(i)) ^ entry.type_bb[i];
+            }
+            if (diff) {
+                while (diff) {
+                    Square sq = pop_lsb(diff);
+                    Piece fin_pc = entry.board[sq];
+                    Piece cur_pc = pos.piece_on(sq);
+
+                    if (fin_pc != NO_PIECE) {
+                        int feat = feature_index_stm(pov, ksq, fin_pc, sq);
+                        if (feat >= 0) shadow_simd::sub_i16(entry.acc, w1_row(feat), HIDDEN);
+                    }
+                    if (cur_pc != NO_PIECE) {
+                        int feat = feature_index_stm(pov, ksq, cur_pc, sq);
+                        if (feat >= 0) shadow_simd::add_i16(entry.acc, w1_row(feat), HIDDEN);
+                    }
+                    entry.board[sq] = cur_pc;
+                }
+                for (int i = 0; i < COLOR_NB; ++i) entry.color_bb[i] = pos.pieces(static_cast<Color>(i));
+                for (int i = PAWN; i <= KING; ++i) entry.type_bb[i] = pos.pieces(static_cast<PieceType>(i));
+            }
+        }
+        shadow_simd::copy_i16(out_acc, entry.acc, HIDDEN);
     }
 
     void refresh_pair(const Position& pos, AccumulatorPair& pair) {
