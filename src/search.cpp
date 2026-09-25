@@ -53,6 +53,7 @@ inline constexpr int ROOT_ASPIRATION_WIDENING_FACTOR = 17;
 inline constexpr int ROOT_ASPIRATION_REDUCTION_MAX = 3;
 inline constexpr int QS_MAX_PLY_GUARD = MAX_PLY - 4;
 inline constexpr int QS_FUTILITY_MARGIN = 153;
+inline constexpr int QS_MAX_MOVES = 3;
 inline constexpr int SINGULAR_BETA_MARGIN = 64;
 inline constexpr int SINGULAR_DOUBLE_EXT_MARGIN = 13;
 inline constexpr int SINGULAR_TRIPLE_EXT_MARGIN = 121;
@@ -186,6 +187,10 @@ static inline int clamp_eval_score(int score)
 static inline bool is_decisive_score(int score)
 {
     return std::abs(score) >= MATE_SCORE - MAX_PLY;
+}
+
+static inline bool is_loss(int score) {
+    return score <= -MATE_SCORE + MAX_PLY;
 }
 
 static inline int interpolate_1024(int a, int b, int t)
@@ -751,6 +756,10 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     picker.init_qsearch(pos, inChk, q_tt_move);
 
     int legal_moves = 0;
+    Square prev_sq = SQ_NONE;
+    if (ply > 0 && ss[ply - 1].current_move != 0) {
+        prev_sq = to_sq(ss[ply - 1].current_move);
+    }
 
     for (Move m = picker.next(false); m; m = picker.next(false))
     {
@@ -760,19 +769,30 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
         if (!inChk && isQuiet) {
             continue;
         }
-        if (!inChk && !isQuiet) {
-            const int futility_value = ss[ply].static_eval + QS_FUTILITY_MARGIN + qsearch_piece_value(captured_piece_for_move(pos, m));
-            if (futility_value <= alpha && !movepick_see_ge(pos, m, 1)) {
-                continue;
+
+        if (!is_loss(best_score)) {
+            if (inChk && isQuiet) {
+                break;
+            }
+            if (prev_sq != to_sq(m) && !is_promotion(m) && !pos.gives_check(m)) {
+                // Futility
+                if (!inChk && !isQuiet) {
+                    const int futility_value = ss[ply].static_eval + QS_FUTILITY_MARGIN + qsearch_piece_value(captured_piece_for_move(pos, m));
+                    if (futility_value <= alpha && !movepick_see_ge(pos, m, 1)) {
+                        continue;
+                    }
+                }
             }
 
+            // SEE pruning
             if (!movepick_see_ge(pos, m, -73)) {
                 continue;
             }
         }
 
-        if (!pos.make_move(m, true, true))
+        if (!pos.make_move(m, true, true)) {
             continue;
+        }
 
         ss[ply + 1].acc_valid = false;
         tt_prefetch(pos.hash());
