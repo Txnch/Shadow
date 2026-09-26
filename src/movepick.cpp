@@ -136,24 +136,7 @@ namespace {
         return bool(res);
     }
 
-    static int capture_mvv_lva_internal(const Position& pos, Move m) {
-        if (!is_capture(m))
-            return 0;
-
-        const Piece attacker = pos.piece_on(from_sq(m));
-
-        Piece victim = pos.piece_on(to_sq(m));
-        if (is_en_passant(m))
-            victim = make_piece(~pos.side_to_move(), PAWN);
-
-        return value_of(piece_type(victim)) * 16 - value_of(piece_type(attacker));
-    }
-
 } // namespace
-
-int movepick_capture_mvv_lva(const Position& pos, Move m) {
-    return capture_mvv_lva_internal(pos, m);
-}
 
 bool movepick_see_ge(const Position& pos, Move m, int threshold) {
     return see_ge(pos, m, threshold);
@@ -163,21 +146,22 @@ MovePicker::MovePicker() = default;
 
 int MovePicker::score_main_move(const Position& pos, Move m, const MovePicker::MainOrderData& order_data) {
     if (is_capture(m) || is_promotion(m)) {
-        int score = 200000;
-        if (is_capture(m)) score += movepick_capture_mvv_lva(pos, m);
+        int score = 0;
+        Piece victim = NO_PIECE;
+
+        if (is_capture(m)) {
+            victim = pos.piece_on(to_sq(m));
+            if (is_en_passant(m))
+                victim = make_piece(~pos.side_to_move(), PAWN);
+
+            score += value_of(piece_type(victim)) * 7;
+        }
 
         if (order_data.capture_history) {
             const Piece attacker = pos.piece_on(from_sq(m));
-            Piece victim = NO_PIECE;
-
-            if (is_capture(m)) {
-                victim = pos.piece_on(to_sq(m));
-                if (is_en_passant(m))
-                    victim = make_piece(~pos.side_to_move(), PAWN);
+            if (attacker != NO_PIECE) {
+                score += order_data.capture_history[attacker][to_sq(m)][victim];
             }
-
-            if (attacker != NO_PIECE)
-                score += order_data.capture_history[attacker][to_sq(m)][victim] / 16;
         }
         return score;
     }
@@ -303,7 +287,8 @@ Move MovePicker::next(bool skip_quiets) {
                 bool is_good = true;
 
                 if (is_capture(m)) {
-                    const int see_margin = -movepick_capture_mvv_lva(*pos_ptr, m) / 32;
+                    const int see_margin = -scores[i] / 14;
+
                     if (!movepick_see_ge(*pos_ptr, m, see_margin)) {
                         is_good = false;
                     }

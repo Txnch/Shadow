@@ -3,8 +3,6 @@
 #include "move.h"
 
 class Position;
-
-int movepick_capture_mvv_lva(const Position& pos, Move m);
 bool movepick_see_ge(const Position& pos, Move m, int threshold);
 
 class MovePicker {

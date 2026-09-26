@@ -53,7 +53,6 @@ inline constexpr int ROOT_ASPIRATION_WIDENING_FACTOR = 17;
 inline constexpr int ROOT_ASPIRATION_REDUCTION_MAX = 3;
 inline constexpr int QS_MAX_PLY_GUARD = MAX_PLY - 4;
 inline constexpr int QS_FUTILITY_MARGIN = 153;
-inline constexpr int QS_MAX_MOVES = 3;
 inline constexpr int SINGULAR_BETA_MARGIN = 64;
 inline constexpr int SINGULAR_DOUBLE_EXT_MARGIN = 13;
 inline constexpr int SINGULAR_TRIPLE_EXT_MARGIN = 121;
@@ -765,10 +764,6 @@ static int qsearch(Position& pos, int alpha, int beta, int ply, SearchStack* ss)
     {
         Piece movedPiece = pos.piece_on(from_sq(m));
         bool isQuiet = !is_capture(m) && !is_promotion(m);
-
-        if (!inChk && isQuiet) {
-            continue;
-        }
 
         if (!is_loss(best_score)) {
             if (inChk && isQuiet) {
