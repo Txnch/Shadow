@@ -56,6 +56,8 @@ inline constexpr int QS_FUTILITY_MARGIN = 153;
 inline constexpr int SINGULAR_BETA_MARGIN = 64;
 inline constexpr int SINGULAR_DOUBLE_EXT_MARGIN = 13;
 inline constexpr int SINGULAR_TRIPLE_EXT_MARGIN = 121;
+inline constexpr int LMR_CHECK_REDUCTION = 851;
+inline constexpr int LMR_COMPLEXITY_DIV = 120;
 
 enum NodeType {
     Root,
@@ -64,9 +66,8 @@ enum NodeType {
 };
 
 // LMR
-inline constexpr int LMR_SCALE = 1024;
-inline constexpr int LMR_CHECK_REDUCTION = 851;
 inline constexpr uint64_t SEARCH_POLL_MASK = 4095ULL;
+inline constexpr int LMR_SCALE = 1024;
 
 static int LMR_TABLE[2][64][256];
 
@@ -1308,6 +1309,8 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 if (inChk) {
                     R_scaled -= LMR_SCALE;
                 }
+
+                R_scaled -= (corrplexity * LMR_SCALE) / LMR_COMPLEXITY_DIV;
 
                 if (tt_hit && tt_depth >= depth) {
                     R_scaled -= LMR_SCALE;
