@@ -60,6 +60,7 @@ struct RootMove {
     uint64_t nodes = 0;
     Move pv[MAX_PLY]{};
     int pv_length = 0;
+    int average_score = -SEARCH_INF;
 };
 
 struct RootSearchContext {

@@ -47,10 +47,8 @@ inline constexpr int NMP_DEPTH_MUL = 30;
 inline constexpr int NMP_BASE = 150;
 inline constexpr int NMP_DIV = 200;
 
-inline constexpr int ROOT_ASPIRATION_DEPTH = 3;
-inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 16;
-inline constexpr int ROOT_ASPIRATION_WIDENING_FACTOR = 17;
-inline constexpr int ROOT_ASPIRATION_REDUCTION_MAX = 3;
+inline constexpr int ROOT_ASPIRATION_DEPTH = 4;       
+inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 8; 
 inline constexpr int QS_MAX_PLY_GUARD = MAX_PLY - 4;
 inline constexpr int QS_FUTILITY_MARGIN = 153;
 inline constexpr int SINGULAR_BETA_MARGIN = 64;
@@ -1373,6 +1371,9 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 if (moveCount == 1 || score > alpha) {
                     root_move.score = score;
                     root_move.uci_score = score;
+                    root_move.average_score = (root_move.average_score != -INF)
+                        ? (root_move.average_score + score) / 2
+                        : score;
                     root_move.lowerbound = false;
                     root_move.upperbound = false;
 
@@ -1787,6 +1788,7 @@ SearchResult search(Position& pos,
         root_moves[i].move = legal_root_moves.moves[i];
         root_moves[i].pv[0] = root_moves[i].move;
         root_moves[i].pv_length = 1;
+        root_moves[i].average_score = -INF;
     }
 
     if (root_count == 0)
@@ -1822,7 +1824,9 @@ SearchResult search(Position& pos,
 
         prepare_root_moves_for_depth(root_moves, root_count);
 
-        int delta = ROOT_ASPIRATION_DELTA_BASE;
+        // 1. ฮาร์ดโค้ดเลข 13000 ไปเลย
+        int avg_score = (root_moves[0].average_score != -INF) ? root_moves[0].average_score : 0;
+        int delta = ROOT_ASPIRATION_DELTA_BASE + (avg_score * avg_score) / 13000;
 
         int alpha = -INF;
         int beta = INF;
@@ -1835,6 +1839,7 @@ SearchResult search(Position& pos,
         int best_score = -INF;
         Move current_depth_best_move = 0;
         uint64_t current_depth_best_move_nodes = 0;
+
         int aspiration_reduction = 0;
 
         while (true) {
@@ -1864,16 +1869,14 @@ SearchResult search(Position& pos,
             }
             else if (best_score >= beta) {
                 beta = std::min(INF, best_score + delta);
-                aspiration_reduction = std::min(aspiration_reduction + 1, ROOT_ASPIRATION_REDUCTION_MAX);
+                aspiration_reduction++;
             }
             else {
                 current_depth_best_move = root_moves[0].move;
                 current_depth_best_move_nodes = root_moves[0].nodes;
                 break;
             }
-
-            delta += delta * ROOT_ASPIRATION_WIDENING_FACTOR / 16;
-
+            delta += delta / 3;
         }
 
         if (search_stop_requested()) break;
