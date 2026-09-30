@@ -250,6 +250,30 @@ void MovePicker::init_qsearch(const Position& pos,
     stage = has_tt ? ST_QS_TT : ST_QS_GEN;
 }
 
+void MovePicker::init_probcut(const Position& pos,
+    int threshold,
+    const MainOrderData* orderData) {
+    stage = ST_DONE;
+
+    pos_ptr = &pos;
+    order_data = orderData ? *orderData : MainOrderData{};
+    probcut_threshold = threshold;
+    qs_in_check = false;
+
+    tt = 0;
+    killer_1 = 0;
+    killer_2 = 0;
+    counter = 0;
+
+    has_tt = false;
+    has_k1 = false;
+    has_k2 = false;
+    has_counter = false;
+
+    cur = goodCaptEnd = captEnd = quietEnd = badCaptCur = 0;
+    stage = ST_PROBCUT_GEN;
+}
+
 Move MovePicker::next(bool skip_quiets) {
     if (!pos_ptr)
         return 0;
@@ -461,6 +485,37 @@ Move MovePicker::next(bool skip_quiets) {
             while (cur < captEnd) {
                 select_best(cur, captEnd);
                 return moves[cur++];
+            }
+            stage = ST_DONE;
+            continue;
+        }
+        case ST_PROBCUT_GEN: {
+            MoveList list;
+            generate_captures(*pos_ptr, list);
+
+            captEnd = 0;
+            for (int i = 0; i < list.size; ++i) {
+                const Move m = list.moves[i];
+                if (!m) continue;
+
+                moves[captEnd] = m;
+                scores[captEnd] = score_main_move(*pos_ptr, m, order_data);
+                captEnd++;
+            }
+
+            stage = ST_PROBCUT_MOVES;
+            cur = 0;
+            continue;
+        }
+
+        case ST_PROBCUT_MOVES: {
+            while (cur < captEnd) {
+                select_best(cur, captEnd);
+                Move m = moves[cur++];
+
+                if (movepick_see_ge(*pos_ptr, m, probcut_threshold)) {
+                    return m; 
+                }
             }
             stage = ST_DONE;
             continue;

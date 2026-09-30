@@ -35,6 +35,10 @@ public:
         bool in_check,
         Move tt_move);
 
+    void init_probcut(const Position& pos,
+        int threshold,
+        const MainOrderData* order_data);
+
     Move next(bool skip_quiets = false);
 
 private:
@@ -52,6 +56,8 @@ private:
         ST_QS_TT,
         ST_QS_GEN,
         ST_QS_MOVES,
+        ST_PROBCUT_GEN,
+        ST_PROBCUT_MOVES,
     };
 
 
@@ -83,4 +89,5 @@ private:
     int captEnd = 0;
     int quietEnd = 0;
     int badCaptCur = 0;
+    int probcut_threshold = 0;
 };

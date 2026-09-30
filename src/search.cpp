@@ -46,7 +46,8 @@ inline constexpr int SEE_NOISY = -96;
 inline constexpr int NMP_DEPTH_MUL = 30;
 inline constexpr int NMP_BASE = 150;
 inline constexpr int NMP_DIV = 200;
-
+inline constexpr int PC_MARGIN = 214;
+inline constexpr int PC_MUL = 60;
 inline constexpr int ROOT_ASPIRATION_DEPTH = 4;       
 inline constexpr int ROOT_ASPIRATION_DELTA_BASE = 8; 
 inline constexpr int QS_MAX_PLY_GUARD = MAX_PLY - 4;
@@ -970,7 +971,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
     }
-
+    const MovePicker::MainOrderData orderData = build_main_order_data(ss, ply);
     if constexpr (!isPV) {
         // RFP
         if (!inChk
@@ -1038,20 +1039,24 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
 
-         // ProbCut
-        if (!inChk && depth >= 5 && std::abs(beta) < MATE_SCORE - MAX_PLY && ss[ply].excluded_move == 0)
+		//Probcut
+        int probcut_beta = beta + PC_MARGIN - PC_MUL * improving;
+        if (!inChk
+            && !isPV                                     
+            && depth >= 3                                  
+            && !is_decisive_score(beta)       
+            && ss[ply].excluded_move == 0                  
+            && !(tt_hit && tt_score < probcut_beta))
         {
-            int probcut_beta = beta + 160 - 40 * (improving ? 1 : 0);
             MovePicker pc_picker;
-            pc_picker.init_qsearch(pos, false, tt_move);
-            int pc_count = 0;
+            int threshold = probcut_beta - ss[ply].static_eval;
+            pc_picker.init_probcut(pos, threshold, &orderData);
+            int probcut_depth = std::max(depth - 4, 0);
 
-            while (pc_count < 5)
+            Move m;
+            while ((m = pc_picker.next(false)) != 0) 
             {
-                Move m = pc_picker.next(false);
-                if (!m) break;
-                if (!movepick_see_ge(pos, m, 0)) continue;
-                pc_count++;
+                if (!pos.is_legal(m)) continue;
 
                 Piece movedPiece = pos.piece_on(from_sq(m));
                 if (!pos.make_move(m, true, true)) continue;
@@ -1061,22 +1066,29 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 ss[ply].moved_piece = movedPiece;
 
                 int score = -qsearch(pos, -probcut_beta, -probcut_beta + 1, ply + 1, ss);
+                if (score >= probcut_beta && probcut_depth > 0)
+                {
+                    score = -negamax<NonPV>(pos, probcut_depth, -probcut_beta, -probcut_beta + 1, ply + 1, ss, true, !cutNode);
+                }
+
+                pos.undo_move();
+                if (search_stop_requested())
+                    return 0;
+
                 if (score >= probcut_beta)
                 {
-                    score = -negamax<NonPV>(pos, depth - 3, -probcut_beta, -probcut_beta + 1, ply + 1, ss, true, !cutNode);
-                    if (score >= probcut_beta)
-                    {
-                        pos.undo_move();
-                        int store_score = (score >= MATE_SCORE - MAX_PLY) ? beta : score;
-                        tt_store(key, depth - 3, score_to_tt(store_score, ply), TT_BETA, m, raw_eval);
-                        ss[ply].current_move = 0;
-                        ss[ply].moved_piece = NO_PIECE;
-                        return store_score;
-                    }
-                }
-                pos.undo_move();
-            }
+                    int store_score = score_to_tt(score, ply);
+                    tt_store(key, probcut_depth + 1, store_score, TT_BETA, m, raw_eval);
 
+                    ss[ply].current_move = 0;
+                    ss[ply].moved_piece = NO_PIECE;
+                    if (!is_decisive_score(score)) {
+                        return score - (probcut_beta - beta);
+                    }
+
+                    return score; 
+                }
+            }
             ss[ply].current_move = 0;
             ss[ply].moved_piece = NO_PIECE;
         }
@@ -1090,8 +1102,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             counter_move = search_state.countermove[from_sq(prev)][to_sq(prev)];
     }
 
-
-    const MovePicker::MainOrderData orderData = build_main_order_data(ss, ply);
     MovePicker picker;
     picker.init_main(pos,
         tt_move,
@@ -1824,7 +1834,6 @@ SearchResult search(Position& pos,
 
         prepare_root_moves_for_depth(root_moves, root_count);
 
-        // 1. ฮาร์ดโค้ดเลข 13000 ไปเลย
         int avg_score = (root_moves[0].average_score != -INF) ? root_moves[0].average_score : 0;
         int delta = ROOT_ASPIRATION_DELTA_BASE + (avg_score * avg_score) / 13000;
 
