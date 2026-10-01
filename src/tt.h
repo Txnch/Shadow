@@ -21,7 +21,8 @@ struct TTContext;
 void tt_clear();
 void tt_new_search();
 TTEntry* tt_probe(uint64_t key);
-void tt_store(uint64_t key, int depth, int score, TTFlag flag, Move best_move, int static_eval);
+void tt_store(uint64_t key, int depth, int score, TTFlag flag,
+    Move best_move, int static_eval, bool is_pv = false);
 void tt_prefetch(uint64_t key);
 int tt_hashfull();
 

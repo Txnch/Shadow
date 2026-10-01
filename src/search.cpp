@@ -1085,8 +1085,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                     if (!is_decisive_score(score)) {
                         return score - (probcut_beta - beta);
                     }
-
-                    return score; 
+                    return score;
                 }
             }
             ss[ply].current_move = 0;
@@ -1483,7 +1482,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 }
 
                 if (ss[ply].excluded_move == 0) {
-                    tt_store(key, depth, score_to_tt(store_score, ply), TT_BETA, m, raw_eval);
+                    tt_store(key, depth, score_to_tt(store_score, ply), TT_BETA, m, raw_eval, isPV);
                 }
 
                 if (!inChk && !is_capture(m)
@@ -1586,7 +1585,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     else                         flag = TT_EXACT;
 
     if (ss[ply].excluded_move == 0) {
-        tt_store(key, depth, score_to_tt(node_score, ply), flag, best_move, raw_eval);
+        tt_store(key, depth, score_to_tt(node_score, ply), flag, best_move, raw_eval, isPV);
     }
 
     if (!inChk && !(best_move && is_capture(best_move)) && std::abs(node_score) < MATE_SCORE - 1000) {

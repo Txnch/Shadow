@@ -257,7 +257,8 @@ int tt_hashfull() {
     return int((used * 1000ULL) / (buckets * TT_WAYS));
 }
 
-void tt_store(uint64_t key, int depth, int score, TTFlag flag, Move best_move, int static_eval) {
+void tt_store(uint64_t key, int depth, int score, TTFlag flag,
+    Move best_move, int static_eval, bool is_pv) {
     TTContext& ctx = current_context();
     if (ctx.table.empty())
         return;
@@ -266,28 +267,25 @@ void tt_store(uint64_t key, int depth, int score, TTFlag flag, Move best_move, i
     TTBucket& b = ctx.table[size_t(key & ctx.mask)];
     TTEntry* e = pick_replacement(ctx, b, key);
 
-    if (e->key != key && e->key != 0) {
+    const bool same = (e->key == key);
+    if (!same && e->key != 0) {
         if (incoming_score(depth, flag) < entry_score(ctx, *e))
             return;
     }
+    if (!same || best_move)
+        e->best_move = best_move;
+    if (flag == TT_EXACT
+        || !same
+        || e->gen != current_gen
+        || depth + 4 + 2 * int(is_pv) > e->depth) {
 
-    if (e->key == key) {
-        if (!best_move)
-            best_move = e->best_move;
-
-        if (depth + 2 < e->depth && e->flag == TT_EXACT && flag != TT_EXACT) {
-            e->gen = current_gen;
-            return;
-        }
+        e->depth = depth;
+        e->score = score;
+        e->flag = flag;
+        e->static_eval = static_eval;
+        e->gen = current_gen;
+        e->key = key;
     }
-
-    e->depth = depth;
-    e->score = score;
-    e->flag = flag;
-    e->best_move = best_move;
-    e->static_eval = static_eval;
-    e->gen = current_gen;
-    e->key = key;
 }
 
 TTContext* tt_create_context(int mb)
