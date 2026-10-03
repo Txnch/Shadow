@@ -858,7 +858,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         return draw_score();
     }
 
-
     if (!isRoot && alpha < draw_score() && pos.has_upcoming_repetition(ply))
     {
         alpha = draw_score();
@@ -866,7 +865,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             return alpha;
         }
     }
-
 
     alpha = std::max(alpha, -MATE_SCORE + ply);
     beta = std::min(beta, MATE_SCORE - ply - 1);
@@ -912,7 +910,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
 
     if (depth <= 0 && !inChk)
         return qsearch(pos, alpha, beta, ply, ss);
-
 
 
     // IIR
@@ -971,12 +968,16 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
     }
+
     const MovePicker::MainOrderData orderData = build_main_order_data(ss, ply);
+
+    if (inChk || ss[ply].excluded_move != 0) {
+        goto moves_loop;
+    }
+
     if constexpr (!isPV) {
         // RFP
-        if (!inChk
-            && depth <= RFP_MAX_DEPTH
-            && ss[ply].excluded_move == 0
+        if (depth <= RFP_MAX_DEPTH
             && !is_decisive_score(beta))
         {
             const int rfp_margin = RFP_CONSTANT_MARGIN
@@ -995,7 +996,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         // NMP
         bool prev_is_null = (ply > 0 && ss[ply - 1].current_move == 0);
 
-        if (cutNode && allow_nmp && !inChk && !prev_is_null && ss[ply].excluded_move == 0
+        if (cutNode && allow_nmp && !prev_is_null
             && !(tt_hit && tt_flag == TT_ALPHA && tt_score < beta)
             && !is_decisive_score(beta)
             && ply >= search_state.nmp_min_ply
@@ -1039,13 +1040,10 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             }
         }
 
-		//Probcut
+        // ProbCut
         int probcut_beta = beta + PC_MARGIN - PC_MUL * improving;
-        if (!inChk
-            && !isPV                                     
-            && depth >= 3                                  
-            && !is_decisive_score(beta)       
-            && ss[ply].excluded_move == 0                  
+        if (depth >= 3
+            && !is_decisive_score(beta)
             && !(tt_hit && tt_score < probcut_beta))
         {
             MovePicker pc_picker;
@@ -1054,7 +1052,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             int probcut_depth = std::max(depth - 4, 0);
 
             Move m;
-            while ((m = pc_picker.next(false)) != 0) 
+            while ((m = pc_picker.next(false)) != 0)
             {
                 if (!pos.is_legal(m)) continue;
 
@@ -1092,7 +1090,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
             ss[ply].moved_piece = NO_PIECE;
         }
     }
-
+moves_loop:
     Move counter_move = 0;
     if (ply >= 1)
     {
@@ -1177,48 +1175,55 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         }
 
         const bool givesChk = pos.gives_check(m);
+        if (!inChk && best_score > -MAX_EVAL_SCORE) {
 
-        // LMP
-        if (!isRoot && !inChk && isQuiet && best_score > -MAX_EVAL_SCORE) {
-            int lmp_threshold = (3 + depth * depth) / (improving ? 1 : 2);
-            lmp_threshold += (hist_score * LMP_HISTORY_SCALE) / 8388608;
-            if (moveCount >= lmp_threshold) {
-                skip_quiets = true;
-                pruned_or_skipped_move = true;
-                continue;
+            if (isQuiet) {
+                // LMP
+                if (!isRoot) {
+                    int lmp_threshold = (3 + depth * depth) / (improving ? 1 : 2);
+                    lmp_threshold += (hist_score * LMP_HISTORY_SCALE) / 8388608;
+                    if (moveCount >= lmp_threshold) {
+                        skip_quiets = true;
+                        pruned_or_skipped_move = true;
+                        continue;
+                    }
+                }
+
+                // Futility
+                if constexpr (!isPV) {
+                    if (std::abs(alpha) < FP_ALPHA_LIMIT) {
+                        const int lmr_depth = futility_lmr_depth(depth, moveCount, ss[ply].tt_pv);
+                        const int futility_score = staticEval + FP_MARGIN + depth * FP_SCALE + hist_score / FP_HISTORY_DIVISOR;
+
+                        if (lmr_depth <= FP_MAX_LMR_DEPTH && !givesChk && futility_score <= alpha) {
+                            skip_quiets = true;
+                            pruned_or_skipped_move = true;
+                            continue;
+                        }
+                    }
+                }
             }
-        }
 
-        if constexpr (!isPV) {
-            if (best_score > -MAX_EVAL_SCORE && !inChk && isQuiet && std::abs(alpha) < FP_ALPHA_LIMIT) {
-                const int lmr_depth = futility_lmr_depth(depth, moveCount, ss[ply].tt_pv);
-                const int futility_score = staticEval + FP_MARGIN + depth * FP_SCALE + hist_score / FP_HISTORY_DIVISOR;
+            // SEE
+            if (!isRoot && has_non_pawn_material(pos, pos.side_to_move())) {
+                int see_threshold;
 
-                if (lmr_depth <= FP_MAX_LMR_DEPTH && !givesChk && futility_score <= alpha) {
-                    skip_quiets = true;
+                if (isQuiet) {
+                    int lmr_depth = futility_lmr_depth(depth, moveCount, ss[ply].tt_pv);
+                    see_threshold = SEE_QUIET * lmr_depth * lmr_depth;
+                }
+                else {
+                    see_threshold = SEE_NOISY * depth;
+                }
+
+                if (!movepick_see_ge(pos, m, see_threshold)) {
                     pruned_or_skipped_move = true;
                     continue;
                 }
             }
         }
 
-        if (!isRoot && !inChk && best_score > -MAX_EVAL_SCORE && has_non_pawn_material(pos, pos.side_to_move())) {
-            int see_threshold;
-
-            if (isQuiet) {
-                int lmr_depth = futility_lmr_depth(depth, moveCount, ss[ply].tt_pv);
-                
-                see_threshold = SEE_QUIET * lmr_depth * lmr_depth;
-            } else {
-                see_threshold = SEE_NOISY * depth;
-            }
-
-            if (!movepick_see_ge(pos, m, see_threshold)) {
-                pruned_or_skipped_move = true;
-                continue;
-            }
-        }
-
+        // Singular Extension
         int ext = 0;
         const bool tt_has_lower_bound = tt_flag == TT_BETA || tt_flag == TT_EXACT;
         if (!isRoot
@@ -1286,7 +1291,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         }
 
         int  score;
-
         int searchedDepth = std::min(MAX_PLY - 1, depth - 1 + ext);
         const uint64_t root_move_nodes_before = isRoot ? current_search_nodes() : 0;
 
@@ -1297,7 +1301,6 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
         }
         else {
             search_state.pv_length[ply + 1] = 0;
-
             int R = 0;
 
             // LMR
@@ -1515,6 +1518,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
                 break;
         }
     }
+
     if (search_stop_requested())
         return alpha;
 
@@ -1582,7 +1586,7 @@ static int negamax(Position& pos, int depth, int alpha, int beta, int ply, Searc
     TTFlag flag;
     if (node_score <= original_alpha) flag = TT_ALPHA;
     else if (node_score >= beta)      flag = TT_BETA;
-    else                         flag = TT_EXACT;
+    else                              flag = TT_EXACT;
 
     if (ss[ply].excluded_move == 0) {
         tt_store(key, depth, score_to_tt(node_score, ply), flag, best_move, raw_eval, isPV);
